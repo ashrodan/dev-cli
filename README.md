@@ -115,9 +115,9 @@ This is a convenience over a plaintext file, not a secret manager. See
 [docs/secrets.md](docs/secrets.md) for the real design discussion and why
 runtime injection is not the same thing as isolation.
 
-## Tailnet host discovery
+## Fleet discovery
 
-Two helpers in `bin/`, for using the box (and its siblings) from other devices.
+Two helpers in `bin/`, for reaching the box and its siblings from other devices.
 
 `exe-tailscale-enroll` joins every exe.dev VM tagged `tailscale` to the tailnet.
 Each VM mints its own single-use, 10-minute auth key through the exe.dev
@@ -130,19 +130,30 @@ ssh exe.dev "integrations attach tailscale tag:tailscale"   # once
 exe-tailscale-enroll
 ```
 
-`tailnet-hosts` then writes those hosts to `~/.ssh/config.d/tailnet` and ensures
-`~/.ssh/config` includes it. Termius imports from `~/.ssh/config`, and a Termius
-account syncs the result to your phone and tablet — so tagging a VM is the only
-manual step, and it shows up everywhere.
+`fleet-hosts` writes an SSH config entry for every running exe.dev VM into
+`~/.ssh/config.d/fleet`, and ensures `~/.ssh/config` includes it. VMs on the
+tailnet are addressed by Tailscale IP — no exe.dev auth in the path, reachable
+from any device on the tailnet — and also get a `-pub` alias on the public
+hostname as a fallback for when Tailscale is off. Everything else uses the
+public hostname. exe.dev tags and comments are carried through as comments.
 
 ```sh
-tailnet-hosts --dry-run
-tailnet-hosts
+fleet-hosts --dry-run
+fleet-hosts
 ```
 
-Only Linux peers are emitted; phones and tablets are skipped. Tailscale IPs are
-stable per device, so the generated entries do not depend on MagicDNS being
-applied on the client.
+Run it on a schedule so the list stays current:
+
+```xml
+<!-- ~/Library/LaunchAgents/dev.fleet-hosts.plist -->
+<key>ProgramArguments</key><array><string>~/dev/dev-cli/bin/fleet-hosts</string></array>
+<key>RunAtLoad</key><true/>
+<key>StartInterval</key><integer>900</integer>
+```
+
+Termius imports from `~/.ssh/config`, and a Termius account syncs the result to
+your phone and tablet. Note that Termius' import is a one-time copy rather than
+a live subscription — re-import when the fleet changes.
 
 ## Requirements
 

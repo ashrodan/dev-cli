@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# fleet-hosts — generate SSH config for every exe.dev VM, preferring the tailnet.
+#
+# Writes a managed block to ~/.ssh/config.d/fleet and ensures ~/.ssh/config
+# includes it. Termius imports from ~/.ssh/config, and a Termius account syncs
+# the result to your other devices.
+#
+#   fleet-hosts             regenerate
+#   fleet-hosts --dry-run   print what would be written
+#   fleet-hosts --user X    login user (default: exedev)
+#
+# Each running VM gets one entry. If the VM is on the tailnet it is addressed by
+# its Tailscale IP (no exe.dev auth in the path, works from any device on the
+# tailnet) and also gets a `-pub` alias on the public hostname as a fallback for
+# when Tailscale is off. VMs not on the tailnet just get the public hostname.
+
+set -euo pipefail
+
+OUT="${FLEET_HOSTS_FILE:-$HOME/.ssh/config.d/fleet}"
+USER_NAME="exedev"
+DRY=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY=1; shift ;;
+    --user)    USER_NAME="$2"; shift 2 ;;
+    --out)     OUT="$2"; shift 2 ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "fleet-hosts: unknown option $1" >&2; exit 1 ;;
+  esac
+done
+
+vms=$(ssh exe.dev "ls --json" 2>/dev/null) || { echo "fleet-hosts: could not reach exe.dev" >&2; exit 1; }
+peers=$(tailscale status --json 2>/dev/null || echo '{}')
+
+block=$(VMS="$vms" PEERS="$peers" USER_NAME="$USER_NAME" python3 <<'PY'
+import json, os, re
+
+vms   = json.loads(os.environ["VMS"])
+peers = json.loads(os.environ["PEERS"] or "{}")
+user  = os.environ["USER_NAME"]
+
+vms = vms if isinstance(vms, list) else vms.get("vms", vms)
+
+# tailnet hostname -> first IPv4
+ts = {}
+for p in (peers.get("Peer") or {}).values():
+    name = (p.get("HostName") or "").lower()
+    ips  = [a for a in (p.get("TailscaleIPs") or []) if ":" not in a]
+    if name and ips:
+        ts[name] = ips[0]
+
+out, counts = [], {"tailnet": 0, "public": 0}
+for v in sorted(vms, key=lambda x: x.get("vm_name") or ""):
+    if v.get("status") != "running":
+        continue
+    name = (v.get("vm_name") or "").strip()
+    if not name:
+        continue
+    alias  = re.sub(r"[^A-Za-z0-9._-]", "-", name)
+    public = (v.get("ssh_host") or "%s.exe.xyz" % name).strip()
+    tags   = ",".join(v.get("tags") or []) or "-"
+    note   = (v.get("comment") or "").strip()
+    ip     = ts.get(name.lower())
+
+    head = "# %s   tags: %s" % (name, tags)
+    if note:
+        head += "   — %s" % note[:60]
+    out.append(head)
+    out.append("Host %s" % alias)
+    out.append("  HostName %s" % (ip or public))
+    out.append("  User %s" % user)
+    out.append("  ServerAliveInterval 30")
+    out.append("  ServerAliveCountMax 6")
+    out.append("")
+
+    if ip:
+        counts["tailnet"] += 1
+        out.append("# %s over the exe.dev proxy — fallback when Tailscale is off" % name)
+        out.append("Host %s-pub" % alias)
+        out.append("  HostName %s" % public)
+        out.append("  User %s" % user)
+        out.append("")
+    else:
+        counts["public"] += 1
+
+if not out:
+    raise SystemExit("fleet-hosts: no running VMs found")
+
+print("\n".join(out).rstrip())
+print("\n# %d via tailnet, %d via public hostname" % (counts["tailnet"], counts["public"]))
+PY
+)
+
+header="# managed by fleet-hosts — regenerate, do not hand-edit
+# exe.dev VMs; tailnet-joined boxes are addressed by Tailscale IP"
+
+if [ "$DRY" = 1 ]; then
+  printf '%s\n\n%s\n\n-- would write to %s\n' "$header" "$block" "$OUT"
+  exit 0
+fi
+
+mkdir -p "$(dirname "$OUT")"
+printf '%s\n\n%s\n' "$header" "$block" > "$OUT"
+chmod 600 "$OUT"
+
+# ssh_config takes the FIRST value for any keyword, so Include must precede any
+# Host block that could also match.
+cfg="$HOME/.ssh/config"
+if [ -f "$cfg" ] && ! grep -qF "config.d/*" "$cfg"; then
+  cp "$cfg" "$cfg.bak.$(date +%Y%m%d%H%M%S)"
+  printf 'Include ~/.ssh/config.d/*\n\n%s' "$(cat "$cfg")" > "$cfg.new" && mv "$cfg.new" "$cfg"
+  echo "fleet-hosts: added Include to $cfg (backup alongside)"
+fi
+
+echo "fleet-hosts: wrote $(grep -c '^Host ' "$OUT") entries to $OUT"
+grep '^Host ' "$OUT" | sed 's/^Host /  /'
