@@ -12,10 +12,13 @@ happens to hold the primary branch.
 ## Usage
 
 ```
-dev                     pick a worktree
-                          enter   → attach the herdr session, focused there
-                          ctrl-o  → open in VS Code (Remote-SSH)
-dev ls                  list every worktree across every repo
+dev                     pick a worktree, then choose what to do with it
+                          enter / →  open the action menu
+                          ctrl-o     VS Code      ctrl-h  herdr
+                          ctrl-p     preview      ctrl-e  env push
+dev ls                  list every worktree, with any servers it is running
+dev ps                  every listening server on the box, with preview URLs
+dev preview [query]     open a running server in the browser
 dev new [repo] <branch> [--base ref]
 dev code  [query]       open in VS Code, skipping the picker on a unique match
 dev herdr [query]       attach herdr, same matching
@@ -43,6 +46,24 @@ Everything is driven through herdr's socket API over a single SSH connection:
 Repo discovery is a `find -maxdepth 3` for `.git` under the remote home,
 skipping dotfiles and `node_modules`. New worktrees are created under
 `~/worktrees/<repo>/<branch>` with `/` in branch names flattened to `-`.
+
+## Running servers
+
+`dev ls` annotates each worktree with the ports it is listening on, found by
+matching listening sockets to the owning process's `/proc/<pid>/cwd`. `dev ps`
+lists them with the URL that actually reaches them:
+
+```
+servers in worktrees
+  ccare-app     3000    https://herdr-1.exe.xyz:3000/
+other listeners
+  MainThread    8000    https://herdr-1.exe.xyz/
+```
+
+URLs follow the exe.dev proxy rules — the designated port is served at the bare
+hostname, 3000-9999 are forwarded per-port, anything else falls back to the
+Tailscale address. Ports bound to `127.0.0.1` are flagged as unreachable rather
+than offered, since the proxy cannot see them.
 
 ## Asking an agent, in context
 
