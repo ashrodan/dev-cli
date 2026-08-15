@@ -107,3 +107,22 @@ agent idle, not blocked     409  "agent is idle, not waiting — refusing"
 unknown pane                404
 unknown action              404
 ```
+
+### Why the web app fails and the Android app does not
+
+`TypeError: Failed to fetch` from the ntfy **web** app is two browser rules, not
+a bug in the endpoint:
+
+1. **Mixed content** — the ntfy page is `https://`, the endpoint is `http://`.
+   Browsers block that outright, and CORS headers do not help.
+2. **CORS preflight** — the `Authorization` header makes the browser send an
+   `OPTIONS` request first. Handled now.
+
+The **native Android app** performs http actions itself, subject to neither
+rule, so Continue works there against a plain-http tailnet endpoint.
+
+To make the web app work as well, the endpoint has to be served over TLS. On a
+tailnet that means enabling HTTPS certificates for the tailnet
+(`httpsEnabled` in tailnet settings) and fronting it with `tailscale serve`.
+Note that issuing those certificates publishes device names to public
+Certificate Transparency logs.
