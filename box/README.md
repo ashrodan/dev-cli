@@ -29,6 +29,12 @@ which cannot travel in a header.
 
 `blocked` sends at priority 4 with a warning tag; `idle`/`done` at priority 3.
 
+Each notification carries an **Open Termius** action button alongside the click
+target. Note that `termius://` only launches the app — the scheme carries no
+route, so there is no way to deep-link to a specific host. The title names the
+workspace instead. Relabel with `AGENT_NOTIFY_ACTION_LABEL`, or set it empty to
+drop the button.
+
 Runs as `agent-notify.service`. Silent on first pass, so restarting it does not
 fire a notification for every agent already sitting idle. Transitions into
 `working`, and anything involving `unknown`, are ignored — `unknown` flaps while

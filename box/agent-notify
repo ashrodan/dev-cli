@@ -30,6 +30,9 @@ HERDR = os.environ.get("AGENT_NOTIFY_HERDR", os.path.expanduser("~/.local/bin/he
 NTFY_BASE = os.environ.get("AGENT_NOTIFY_NTFY", "")      # e.g. http://100.75.93.117:2586
 NTFY_TOPIC = os.environ.get("AGENT_NOTIFY_TOPIC", "")
 CLICK = os.environ.get("AGENT_NOTIFY_CLICK", "termius://")
+# ntfy allows up to three action buttons. `termius://` only launches the app —
+# the scheme carries no route, so there is no way to target a specific host.
+ACTION_LABEL = os.environ.get("AGENT_NOTIFY_ACTION_LABEL", "Open Termius")
 # exe.dev push, kept as a fallback; no click target, opens the exe.dev app
 EXE_URL = os.environ.get("AGENT_NOTIFY_EXE", "")
 POLL_SECONDS = float(os.environ.get("AGENT_NOTIFY_POLL", "5"))
@@ -110,6 +113,13 @@ def notify(title, message, priority=3, tag=""):
         }
         if CLICK:
             body["click"] = CLICK
+            if ACTION_LABEL:
+                body["actions"] = [{
+                    "action": "view",
+                    "label": ACTION_LABEL,
+                    "url": CLICK,
+                    "clear": True,      # dismiss the notification once tapped
+                }]
         if tag:
             body["tags"] = [tag]
         try:
