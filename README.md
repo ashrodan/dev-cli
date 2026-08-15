@@ -187,6 +187,13 @@ git clone https://github.com/ashrodan/dev-cli.git ~/dev/dev-cli
 ln -s ~/dev/dev-cli/dev ~/.local/bin/dev
 ```
 
+## Docs
+
+- [docs/new-box.md](docs/new-box.md) — runbook for bringing a fresh exe.dev VM to
+  the same state, including the gotchas that cost time the first go
+- [docs/secrets.md](docs/secrets.md) — tabled decision on runtime secret injection
+- [box/README.md](box/README.md) — the scripts that live on the box
+
 ## Notes
 
 `dev rm` requires the worktree to be open as a herdr workspace, since removal
