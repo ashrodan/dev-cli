@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# dev — worktree-first navigator for the herdr dev box.
+#
+#   dev              pick a worktree; enter = herdr session, ctrl-o = VS Code
+#   dev ls           list every worktree across every repo
+#   dev new [repo] <branch> [--base ref]
+#   dev rm  [worktree]
+#   dev code [query] open in VS Code (skips the picker on an exact match)
+#   dev herdr [query] attach the herdr session focused on that worktree
+#
+# Worktrees are the unit of work. The main checkout is just the worktree that
+# happens to hold the primary branch.
+
+set -uo pipefail
+
+REMOTE="${DEV_REMOTE:-dai}"
+RHOME="${DEV_REMOTE_HOME:-/home/exedev}"
+HERDR="$RHOME/.local/bin/herdr"
+WT_ROOT="${DEV_WT_ROOT:-$RHOME/worktrees}"
+SESSION="${DEV_SESSION:-default}"
+
+die() { printf 'dev: %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+
+# --- scan: one SSH round trip, TSV out -------------------------------------
+# repo <TAB> branch <TAB> path <TAB> workspace_id <TAB> kind
+scan() {
+  ssh "$REMOTE" "RHOME='$RHOME' HERDR='$HERDR' bash -s" <<'REMOTE_EOF'
+set -uo pipefail
+export PATH="$RHOME/.local/bin:$PATH"
+find "$RHOME" -maxdepth 3 -name .git \
+     -not -path '*/node_modules/*' -not -path "$RHOME/.*" \
+     -printf '%h\n' 2>/dev/null | sort -u | while read -r repo; do
+  "$HERDR" worktree list --cwd "$repo" 2>/dev/null
+done | python3 -c '
+import json, sys
+seen = set()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        res = json.loads(line).get("result", {})
+    except Exception:
+        continue
+    repo = res.get("source", {}).get("repo_name", "?")
+    for w in res.get("worktrees", []):
+        path = w.get("path", "")
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        print("\t".join([
+            repo,
+            w.get("branch") or "(detached)",
+            path,
+            w.get("open_workspace_id") or "",
+            "linked" if w.get("is_linked_worktree") else "main",
+        ]))
+'
+REMOTE_EOF
+}
+
+fmt() {  # TSV -> aligned, path last so awk '{print $NF}' recovers it
+  awk -F'\t' '{
+    open = ($4 == "" ? "  " : "● ")
+    printf "%s%-14s  %-34s  %-6s  %s\n", open, $1, $2, $5, $3
+  }'
+}
+
+# --- actions ---------------------------------------------------------------
+open_code() {
+  need code
+  code --remote "ssh-remote+$REMOTE" "$1" \
+    && printf 'dev: opened %s in VS Code\n' "$1"
+}
+
+open_herdr() {
+  local path="$1" ws
+  ws=$(ssh "$REMOTE" "$HERDR worktree open --path '$path' 2>/dev/null" |
+       python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("result",{}).get("workspace_id","") or "")
+except Exception: print("")' 2>/dev/null)
+  [ -n "$ws" ] && ssh "$REMOTE" "$HERDR workspace focus $ws" >/dev/null 2>&1
+  exec ssh -t "$REMOTE" "$HERDR --session $SESSION"
+}
+
+# --- picker ----------------------------------------------------------------
+# echoes the chosen path; sets PICK_KEY to the fzf key pressed
+PICK_KEY=""
+pick() {
+  need fzf
+  local rows out
+  rows=$(scan) || die "could not reach $REMOTE"
+  [ -z "$rows" ] && die "no git repositories found under $RHOME"
+
+  if [ -n "${1:-}" ]; then                      # non-interactive on unique match
+    local hit
+    hit=$(printf '%s\n' "$rows" | grep -i -- "$1" || true)
+    if [ "$(printf '%s\n' "$hit" | grep -c .)" = 1 ]; then
+      PICK_KEY=""; printf '%s\n' "$hit" | cut -f3; return 0
+    fi
+  fi
+
+  out=$(printf '%s\n' "$rows" | fmt |
+        fzf --prompt='worktree> ' --reverse --height=45% --ansi \
+            --header='enter = herdr   ctrl-o = VS Code   ● = open workspace' \
+            --expect=ctrl-o --query="${1:-}") || return 1
+  PICK_KEY=$(printf '%s\n' "$out" | sed -n 1p)
+  printf '%s\n' "$out" | sed -n 2p | awk '{print $NF}'
+}
+
+# --- subcommands -----------------------------------------------------------
+cmd_ls() {
+  local rows; rows=$(scan) || die "could not reach $REMOTE"
+  [ -z "$rows" ] && { echo "no worktrees found"; return 0; }
+  printf '%s\n' "$rows" | fmt
+}
+
+cmd_new() {
+  local repo="" branch="" base=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --base) base="$2"; shift 2 ;;
+      *) if [ -z "$branch" ] && [ -n "$repo" ]; then branch="$1"
+         elif [ -z "$repo" ]; then repo="$1"
+         else branch="$1"; fi; shift ;;
+    esac
+  done
+  [ -z "$branch" ] && { branch="$repo"; repo=""; }
+  [ -z "$branch" ] && die "usage: dev new [repo] <branch> [--base ref]"
+
+  if [ -z "$repo" ]; then                        # pick the source repo
+    need fzf
+    local rows; rows=$(scan) || die "could not reach $REMOTE"
+    repo=$(printf '%s\n' "$rows" | awk -F'\t' '$5=="main"{print $1"\t"$3}' | sort -u |
+           fzf --prompt='repo> ' --reverse --height=30% --with-nth=1 --delimiter='\t') || return 1
+    repo=$(printf '%s\n' "$repo" | cut -f2)
+  fi
+  [ -z "$repo" ] && die "no repo selected"
+
+  local slug path
+  slug=$(printf '%s' "$branch" | tr '/' '-')
+  path="$WT_ROOT/$(basename "$repo")/$slug"
+
+  local args="--cwd '$repo' --branch '$branch' --path '$path' --focus"
+  [ -n "$base" ] && args="$args --base '$base'"
+
+  ssh "$REMOTE" "mkdir -p '$(dirname "$path")' && $HERDR worktree create $args" >/dev/null \
+    || die "worktree create failed"
+  printf 'dev: created %s on %s\n' "$path" "$branch"
+  printf '     dev code %s   |   dev herdr %s\n' "$slug" "$slug"
+}
+
+cmd_rm() {
+  local path ws
+  path=$(pick "${1:-}") || return 1
+  [ -z "$path" ] && return 1
+  ws=$(scan | awk -F'\t' -v p="$path" '$3==p{print $4}')
+  printf 'Remove worktree %s? [y/N] ' "$path"
+  read -r ans; [ "$ans" = y ] || [ "$ans" = Y ] || { echo "aborted"; return 1; }
+  [ -z "$ws" ] && die "worktree is not open as a workspace; open it first with: dev herdr"
+  ssh "$REMOTE" "$HERDR worktree remove --workspace '$ws'" && echo "dev: removed $path"
+}
+
+main() {
+  case "${1:-}" in
+    ls|list)   shift; cmd_ls "$@" ;;
+    new|add)   shift; cmd_new "$@" ;;
+    rm|remove) shift; cmd_rm "$@" ;;
+    code)      shift; p=$(pick "${1:-}") && [ -n "$p" ] && open_code "$p" ;;
+    herdr|h)   shift; p=$(pick "${1:-}") && [ -n "$p" ] && open_herdr "$p" ;;
+    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)
+      p=$(pick "${1:-}") || exit 0
+      [ -z "$p" ] && exit 0
+      case "$PICK_KEY" in
+        ctrl-o) open_code "$p" ;;
+        *)      open_herdr "$p" ;;
+      esac ;;
+  esac
+}
+
+main "$@"
