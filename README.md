@@ -20,6 +20,11 @@ dev new [repo] <branch> [--base ref]
 dev code  [query]       open in VS Code, skipping the picker on a unique match
 dev herdr [query]       attach herdr, same matching
 dev rm    [query]       remove a worktree checkout
+
+dev env push [query] [--from FILE]
+                        interactively pick .env vars and copy them over
+dev env ls   [query]    key names present on the remote worktree
+dev env diff [query]    which keys are local-only vs remote-only
 ```
 
 A `●` in the listing marks a worktree that already has an open herdr workspace.
@@ -38,6 +43,43 @@ Everything is driven through herdr's socket API over a single SSH connection:
 Repo discovery is a `find -maxdepth 3` for `.git` under the remote home,
 skipping dotfiles and `node_modules`. New worktrees are created under
 `~/worktrees/<repo>/<branch>` with `/` in branch names flattened to `-`.
+
+## Asking an agent, in context
+
+```
+dev ask -w ccare 'why is the migration failing?'   one-shot answer
+dev ask -a gemini -w ccare 'summarise this repo'   pick the agent
+dev ask -w ccare                                   interactive session there
+```
+
+The agent runs *inside* the worktree, so it starts with the repo, the branch and
+the box's global `AGENTS.md` as context rather than being told about them. With
+no question it drops you into an interactive session in that directory instead.
+
+Agents: `claude` (default), `codex`, `gemini`, `grok`. The prompt travels over
+stdin and the remote shell builds argv, so quoting and apostrophes are safe.
+
+## Copying env vars
+
+`dev env push` opens a multi-select picker over the keys in a local `.env`
+(defaulting to `~/dev/<repo>/.env`), and merges the chosen ones into the
+worktree's `.env` on the box. Existing keys are updated in place, preserving
+comments and ordering; new keys are appended under a dated header. The previous
+file is backed up alongside, and both end up mode `600`.
+
+Values are handled carefully, because the box runs several coding agents as the
+same unix user:
+
+- **Nothing goes through a command line.** `argv` is readable via `ps`, so
+  values travel over stdin only. The remote merge script is passed as base64 and
+  contains no secrets itself.
+- **Nothing touches an intermediate file** on either machine — the payload is a
+  process substitution piped straight into SSH.
+- **The picker shows key names and value lengths**, never values.
+
+This is a convenience over a plaintext file, not a secret manager. See
+[docs/secrets.md](docs/secrets.md) for the real design discussion and why
+runtime injection is not the same thing as isolation.
 
 ## Requirements
 

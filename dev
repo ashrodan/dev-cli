@@ -7,6 +7,10 @@
 #   dev rm  [worktree]
 #   dev code [query] open in VS Code (skips the picker on an exact match)
 #   dev herdr [query] attach the herdr session focused on that worktree
+#   dev env push|ls|diff [query] [--from FILE]
+#                    interactively copy selected .env vars to a worktree
+#   dev ask [-a agent] [-w query] [question...]
+#                    run an agent inside a worktree; no question = interactive
 #
 # Worktrees are the unit of work. The main checkout is just the worktree that
 # happens to hold the primary branch.
@@ -151,6 +155,156 @@ cmd_new() {
   printf '     dev code %s   |   dev herdr %s\n' "$slug" "$slug"
 }
 
+# --- env ------------------------------------------------------------------
+# Values never appear on a command line: argv is world-readable via ps, and the
+# agents on the box run as the same user. Everything moves over stdin, and the
+# picker shows key names and value lengths only.
+
+ENV_MERGE_PY='
+import os, re, sys, time
+target = os.environ["TARGET"]
+incoming = {}
+for line in sys.stdin.read().splitlines():
+    k, sep, v = line.partition("=")
+    if sep and k.strip():
+        incoming[k.strip()] = v
+try:
+    lines = open(target).read().splitlines()
+except FileNotFoundError:
+    lines = []
+if lines:
+    bak = target + ".bak." + time.strftime("%Y%m%d%H%M%S")
+    open(bak, "w").write("\n".join(lines) + "\n")
+    os.chmod(bak, 0o600)
+seen, out = set(), []
+for line in lines:
+    m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+    if m and m.group(1) in incoming:
+        out.append(m.group(1) + "=" + incoming[m.group(1)])
+        seen.add(m.group(1))
+    else:
+        out.append(line)
+added = [k for k in incoming if k not in seen]
+if added:
+    if out and out[-1].strip():
+        out.append("")
+    out.append("# added by dev env push " + time.strftime("%Y-%m-%d"))
+    out += [k + "=" + incoming[k] for k in added]
+open(target, "w").write("\n".join(out) + "\n")
+os.chmod(target, 0o600)
+print("updated %d, added %d, backup %s" % (len(seen), len(added),
+      "yes" if lines else "none (new file)"))
+'
+
+env_keys_local() {  # file -> "KEY<TAB>mask"
+  python3 -c '
+import re, sys
+for line in open(sys.argv[1], errors="replace"):
+    m = re.match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$", line.rstrip("\n"))
+    if not m:
+        continue
+    k, v = m.group(1), m.group(2).strip().strip("\"'"'"'")
+    print("%s\t%s" % (k, "empty" if not v else "%s (%d chars)" % ("*" * min(len(v), 8), len(v))))
+' "$1"
+}
+
+cmd_env() {
+  local sub="${1:-push}"; shift || true
+  local from="" query=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from) from="$2"; shift 2 ;;
+      *) query="$1"; shift ;;
+    esac
+  done
+
+  local target; target=$(pick "$query") || return 1
+  [ -z "$target" ] && return 1
+  local repo; repo=$(basename "$(dirname "$target")")
+  [ "$repo" = "$(basename "$RHOME")" ] && repo=$(basename "$target")
+
+  case "$sub" in
+    ls)
+      ssh "$REMOTE" "sed -n 's/^\s*\([A-Za-z_][A-Za-z0-9_]*\)\s*=.*/\1/p' '$target/.env' 2>/dev/null" |
+        sed 's/^/  /' || echo "  (no .env)"
+      ;;
+    diff)
+      [ -z "$from" ] && from="$HOME/dev/$repo/.env"
+      [ -f "$from" ] || die "no local source: $from"
+      local here there
+      here=$(env_keys_local "$from" | cut -f1 | sort)
+      there=$(ssh "$REMOTE" "sed -n 's/^\s*\([A-Za-z_][A-Za-z0-9_]*\)\s*=.*/\1/p' '$target/.env' 2>/dev/null" | sort)
+      echo "local only  ($from):"; comm -23 <(echo "$here") <(echo "$there") | sed 's/^/  + /'
+      echo "remote only ($target/.env):"; comm -13 <(echo "$here") <(echo "$there") | sed 's/^/  - /'
+      ;;
+    push)
+      need fzf
+      [ -z "$from" ] && from="$HOME/dev/$repo/.env"
+      if [ ! -f "$from" ]; then
+        need fzf
+        from=$(find "$HOME/dev" -maxdepth 2 -name '.env*' -not -path '*/node_modules/*' 2>/dev/null |
+               fzf --prompt='source .env> ' --reverse --height=40%) || return 1
+      fi
+      [ -f "$from" ] || die "no source file"
+
+      local keys
+      keys=$(env_keys_local "$from" |
+             awk -F'\t' '{printf "%-32s %s\n", $1, $2}' |
+             fzf --multi --prompt='vars to copy> ' --reverse --height=50% \
+                 --header="$from  →  $REMOTE:$target/.env    tab = select, enter = push" |
+             awk '{print $1}') || return 1
+      [ -z "$keys" ] && { echo "nothing selected"; return 0; }
+
+      local n; n=$(printf '%s\n' "$keys" | grep -c .)
+      printf 'Copy %d var(s) to %s:%s/.env? [y/N] ' "$n" "$REMOTE" "$target"
+      read -r ans; [ "$ans" = y ] || [ "$ans" = Y ] || { echo "aborted"; return 1; }
+
+      # payload built in a subshell, streamed over stdin, never touching argv or disk
+      ssh "$REMOTE" "TARGET='$target/.env' python3 -c \"\$(printf %s '$(printf '%s' "$ENV_MERGE_PY" | base64)' | base64 -d)\"" \
+        < <(while IFS= read -r k; do
+              [ -z "$k" ] && continue
+              grep -m1 -E "^[[:space:]]*$k[[:space:]]*=" "$from" | sed 's/^[[:space:]]*//'
+            done <<< "$keys")
+      ;;
+    *) die "usage: dev env <push|ls|diff> [worktree] [--from FILE]" ;;
+  esac
+}
+
+# --- ask ------------------------------------------------------------------
+# Escape hatch: run an agent already sitting in the right worktree, so it has
+# the repo, the branch and the box's AGENTS.md as context without being told.
+
+cmd_ask() {
+  local agent="claude" query="" question=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --agent|-a) agent="$2"; shift 2 ;;
+      -w) query="$2"; shift 2 ;;
+      *) question="${question:+$question }$1"; shift ;;
+    esac
+  done
+
+  local one
+  case "$agent" in
+    claude) one='claude -p "$P"' ;;
+    gemini) one='gemini -p "$P"' ;;
+    grok)   one='grok -p "$P"' ;;
+    codex)  one='codex exec --skip-git-repo-check "$P"' ;;
+    *)      die "unknown agent: $agent (claude|codex|gemini|grok)" ;;
+  esac
+
+  local path; path=$(pick "$query") || return 1
+  [ -z "$path" ] && return 1
+
+  if [ -z "$question" ]; then                     # no question -> interactive
+    exec ssh -t "$REMOTE" "cd '$path' && export PATH=\$HOME/.local/bin:\$PATH && exec $agent"
+  fi
+
+  # prompt travels over stdin; the remote shell builds argv, so no local quoting
+  printf '%s' "$question" |
+    ssh "$REMOTE" "cd '$path' && export PATH=\$HOME/.local/bin:\$PATH && P=\$(cat) && $one"
+}
+
 cmd_rm() {
   local path ws
   path=$(pick "${1:-}") || return 1
@@ -167,6 +321,8 @@ main() {
     ls|list)   shift; cmd_ls "$@" ;;
     new|add)   shift; cmd_new "$@" ;;
     rm|remove) shift; cmd_rm "$@" ;;
+    env)       shift; cmd_env "$@" ;;
+    ask|\?)    shift; cmd_ask "$@" ;;
     code)      shift; p=$(pick "${1:-}") && [ -n "$p" ] && open_code "$p" ;;
     herdr|h)   shift; p=$(pick "${1:-}") && [ -n "$p" ] && open_herdr "$p" ;;
     -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' ;;
