@@ -33,6 +33,16 @@ CLICK = os.environ.get("AGENT_NOTIFY_CLICK", "termius://")
 # ntfy allows up to three action buttons. `termius://` only launches the app —
 # the scheme carries no route, so there is no way to target a specific host.
 ACTION_LABEL = os.environ.get("AGENT_NOTIFY_ACTION_LABEL", "Open Termius")
+# agent-action endpoint, tailnet-only, for the Continue button on blocked agents
+ACTION_URL = os.environ.get("AGENT_ACTION_URL", "")
+ACTION_TOKEN_FILE = os.environ.get("AGENT_ACTION_TOKEN_FILE", "/etc/agent-action/token")
+
+
+def action_token():
+    try:
+        return open(ACTION_TOKEN_FILE).read().strip()
+    except OSError:
+        return ""
 # exe.dev push, kept as a fallback; no click target, opens the exe.dev app
 EXE_URL = os.environ.get("AGENT_NOTIFY_EXE", "")
 POLL_SECONDS = float(os.environ.get("AGENT_NOTIFY_POLL", "5"))
@@ -98,7 +108,7 @@ def post(url, payload):
         return resp.read().decode()
 
 
-def notify(title, message, priority=3, tag=""):
+def notify(title, message, priority=3, tag="", pane="", blocked=False):
     """Publish to every configured courier; one failing must not silence others."""
     sent = []
 
@@ -111,15 +121,33 @@ def notify(title, message, priority=3, tag=""):
             "message": message,
             "priority": priority,
         }
+        actions = []
         if CLICK:
             body["click"] = CLICK
             if ACTION_LABEL:
-                body["actions"] = [{
+                actions.append({
                     "action": "view",
                     "label": ACTION_LABEL,
                     "url": CLICK,
                     "clear": True,      # dismiss the notification once tapped
-                }]
+                })
+
+        # Continue is offered only where it means something: an agent that is
+        # actually waiting. The endpoint re-checks state on arrival anyway, so a
+        # stale notification cannot inject a keystroke into a running agent.
+        tok = action_token()
+        if blocked and pane and ACTION_URL and tok:
+            actions.append({
+                "action": "http",
+                "label": "Continue",
+                "url": f"{ACTION_URL.rstrip('/')}/continue?pane={pane}",
+                "method": "POST",
+                "headers": {"Authorization": f"Bearer {tok}"},
+                "clear": True,
+            })
+
+        if actions:
+            body["actions"] = actions
         if tag:
             body["tags"] = [tag]
         try:
@@ -169,7 +197,8 @@ def main():
                 what, priority, tag = ALERT_ON[now]
                 title = f"{info['agent']} · {info['cwd']} — {what}"
                 message = info["title"] or f"workspace {info['workspace']}"
-                notify(title, message, priority, tag)
+                notify(title, message, priority, tag,
+                       pane=pane, blocked=(now == "blocked"))
 
         # forget panes that have gone away
         for pane in list(previous):

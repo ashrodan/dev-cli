@@ -74,3 +74,36 @@ This is an alternative to ntfy.sh for keeping notification content private.
 Trade-off: iOS cannot receive from a self-hosted server without relaying through
 ntfy.sh for APNs, so an iPad either transits a third party anyway or goes
 without. Android connects to a self-hosted server directly.
+
+## agent-action
+
+A small HTTP endpoint so a phone notification can unblock an agent without
+opening a terminal. An ntfy `http` action button POSTs here; this asks herdr to
+send a confirmation keystroke to the waiting pane.
+
+Bound to the **Tailscale interface only** (`100.75.93.117:2587`) — the service
+refuses to start if `AGENT_ACTION_BIND` is unset, rather than defaulting to all
+interfaces.
+
+Acting on a notification means approving something you have not read on screen,
+so the endpoint is deliberately narrow:
+
+- only panes whose **current** state is `blocked` are actionable. A stale
+  notification tapped ten minutes later hits a `409` rather than injecting a
+  keystroke into a running agent.
+- only fixed keys are ever sent — `continue` → enter, `dismiss` → esc. There is
+  no free-text path, so it cannot be used to prompt an agent.
+- every request is logged with its outcome (`journalctl -u agent-action`).
+
+The bearer token is defence in depth, not the primary control: it travels inside
+the ntfy message, so anyone holding the topic can read it. What actually gates
+this is that the listener exists only on the tailnet.
+
+Verified guards:
+
+```
+wrong token                 403
+agent idle, not blocked     409  "agent is idle, not waiting — refusing"
+unknown pane                404
+unknown action              404
+```

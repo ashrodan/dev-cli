@@ -1,0 +1,18 @@
+[Unit]
+Description=Endpoint for notification action buttons (tailnet only)
+After=network-online.target tailscaled.service herdr.service
+Wants=tailscaled.service herdr.service
+
+[Service]
+Type=simple
+User=exedev
+Group=exedev
+Environment=HOME=/home/exedev
+Environment=AGENT_ACTION_BIND=100.75.93.117
+Environment=AGENT_ACTION_PORT=2587
+ExecStart=/home/exedev/.local/bin/agent-action
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

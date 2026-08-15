@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""agent-action — tiny HTTP endpoint so a phone notification can unblock an agent.
+
+Bound to the Tailscale interface only, so it is unreachable from the internet.
+An ntfy `http` action button fires a POST here from the phone; this then asks
+herdr to send a confirmation keystroke to the pane that is waiting.
+
+Deliberately narrow, because acting on a notification means approving something
+you have not read on screen:
+
+  * only panes whose CURRENT state is `blocked` are actionable — a working or
+    idle agent is refused, so a stale notification cannot inject a keystroke
+  * only fixed keys are ever sent (enter / esc). There is no free-text path,
+    so this endpoint cannot be used to prompt an agent
+  * every request is logged with its outcome
+
+The bearer token is defence in depth, not the primary control: it travels inside
+the ntfy message, so anyone holding the topic can read it. What actually gates
+this is that the listener exists only on the tailnet.
+"""
+
+import json
+import hmac
+import os
+import shutil
+import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+HERDR = os.environ.get("AGENT_ACTION_HERDR", "/home/exedev/.local/bin/herdr")
+BIND = os.environ.get("AGENT_ACTION_BIND", "")
+PORT = int(os.environ.get("AGENT_ACTION_PORT", "2587"))
+TOKEN_FILE = os.environ.get("AGENT_ACTION_TOKEN_FILE", "/etc/agent-action/token")
+
+ALLOWED_KEYS = {"continue": "enter", "dismiss": "esc"}
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def token():
+    try:
+        return open(TOKEN_FILE).read().strip()
+    except OSError:
+        return ""
+
+
+def herdr(*args, timeout=15):
+    try:
+        r = subprocess.run([HERDR, *args], capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return None, str(e)
+    if r.returncode != 0:
+        return None, (r.stderr or r.stdout or "").strip()[:200]
+    return r.stdout, None
+
+
+def agent_state(pane):
+    """Current status of a pane, or None if herdr does not know it."""
+    out, err = herdr("agent", "get", pane)
+    if out is None:
+        return None, err
+    try:
+        result = json.loads(out).get("result", {})
+    except json.JSONDecodeError:
+        return None, "unparseable herdr response"
+    agent = result.get("agent") or result
+    return (agent.get("agent_status"), None)
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "agent-action"
+
+    def _reply(self, code, text):
+        body = (text + "\n").encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        log("%s - %s" % (self.address_string(), fmt % args))
+
+    def do_GET(self):
+        if urlparse(self.path).path == "/health":
+            return self._reply(200, "ok")
+        self._reply(404, "not found")
+
+    def do_POST(self):
+        url = urlparse(self.path)
+        q = parse_qs(url.query)
+        action = url.path.strip("/").lower()
+
+        if action not in ALLOWED_KEYS:
+            return self._reply(404, "unknown action")
+
+        expected = token()
+        supplied = (q.get("token") or [""])[0]
+        auth = self.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            supplied = auth[7:].strip()
+        if not expected or not hmac.compare_digest(supplied, expected):
+            log(f"denied {action}: bad token")
+            return self._reply(403, "forbidden")
+
+        pane = (q.get("pane") or [""])[0]
+        if not pane:
+            return self._reply(400, "missing pane")
+
+        status, err = agent_state(pane)
+        if status is None:
+            log(f"denied {action} on {pane}: {err}")
+            return self._reply(404, f"no such agent: {err or pane}")
+
+        if status != "blocked":
+            log(f"refused {action} on {pane}: state is {status}, not blocked")
+            return self._reply(409, f"agent is {status}, not waiting — refusing")
+
+        key = ALLOWED_KEYS[action]
+        out, err = herdr("agent", "send-keys", pane, key)
+        if out is None:
+            log(f"failed {action} on {pane}: {err}")
+            return self._reply(502, f"herdr refused: {err}")
+
+        log(f"{action} -> sent {key} to {pane}")
+        self._reply(200, f"sent {key}")
+
+
+def main():
+    if not shutil.which(HERDR) and not os.path.exists(HERDR):
+        sys.exit(f"herdr not found at {HERDR}")
+    if not token():
+        sys.exit(f"no token in {TOKEN_FILE}")
+    if not BIND:
+        sys.exit("AGENT_ACTION_BIND must be set — refusing to bind all interfaces")
+
+    srv = ThreadingHTTPServer((BIND, PORT), Handler)
+    log(f"listening on {BIND}:{PORT}")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
