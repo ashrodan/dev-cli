@@ -25,15 +25,22 @@ import urllib.error
 import urllib.request
 
 HERDR = os.environ.get("AGENT_NOTIFY_HERDR", os.path.expanduser("~/.local/bin/herdr"))
-NOTIFY_URL = os.environ.get("AGENT_NOTIFY_URL", "https://notify-2.int.exe.xyz/")
+# ntfy is the primary courier: it carries a click target, so the notification
+# can open Termius rather than whichever app happens to own the push channel.
+NTFY_BASE = os.environ.get("AGENT_NOTIFY_NTFY", "")      # e.g. http://100.75.93.117:2586
+NTFY_TOPIC = os.environ.get("AGENT_NOTIFY_TOPIC", "")
+CLICK = os.environ.get("AGENT_NOTIFY_CLICK", "termius://")
+# exe.dev push, kept as a fallback; no click target, opens the exe.dev app
+EXE_URL = os.environ.get("AGENT_NOTIFY_EXE", "")
 POLL_SECONDS = float(os.environ.get("AGENT_NOTIFY_POLL", "5"))
 HOST = os.environ.get("AGENT_NOTIFY_HOST", os.uname().nodename)
 
 # transitions worth waking a phone for
 ALERT_ON = {
-    "blocked": "needs you",
-    "idle": "finished",
-    "done": "finished",
+    #  state  -> (label, ntfy priority, ntfy tag)
+    "blocked": ("needs you", 4, "warning"),
+    "idle": ("finished", 3, "white_check_mark"),
+    "done": ("finished", 3, "white_check_mark"),
 }
 
 
@@ -79,19 +86,46 @@ def agents():
     return found
 
 
-def notify(title, message):
-    payload = json.dumps({"title": title, "message": message}).encode()
+def post(url, payload):
     req = urllib.request.Request(
-        NOTIFY_URL, data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+        url, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = resp.read().decode()
-        log(f"sent: {title} — {message}  ({body.strip()})")
-    except urllib.error.URLError as e:
-        log(f"notify failed: {e}")
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read().decode()
+
+
+def notify(title, message, priority=3, tag=""):
+    """Publish to every configured courier; one failing must not silence others."""
+    sent = []
+
+    if NTFY_BASE and NTFY_TOPIC:
+        # JSON publishing rather than headers: titles contain non-ASCII
+        # (· and —) which cannot travel in an HTTP header.
+        body = {
+            "topic": NTFY_TOPIC,
+            "title": title,
+            "message": message,
+            "priority": priority,
+        }
+        if CLICK:
+            body["click"] = CLICK
+        if tag:
+            body["tags"] = [tag]
+        try:
+            post(NTFY_BASE.rstrip("/") + "/", body)
+            sent.append("ntfy")
+        except (urllib.error.URLError, OSError) as e:
+            log(f"ntfy failed: {e}")
+
+    if EXE_URL:
+        try:
+            post(EXE_URL, {"title": title, "message": message})
+            sent.append("exe")
+        except (urllib.error.URLError, OSError) as e:
+            log(f"exe.dev notify failed: {e}")
+
+    log(f"[{','.join(sent) or 'nowhere'}] {title} — {message}")
 
 
 def main():
@@ -122,10 +156,10 @@ def main():
 
             # only care about leaving `working` for a state that wants attention
             if was == "working" and now in ALERT_ON:
-                what = ALERT_ON[now]
+                what, priority, tag = ALERT_ON[now]
                 title = f"{info['agent']} · {info['cwd']} — {what}"
                 message = info["title"] or f"workspace {info['workspace']}"
-                notify(title, message)
+                notify(title, message, priority, tag)
 
         # forget panes that have gone away
         for pane in list(previous):

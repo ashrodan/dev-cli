@@ -1,0 +1,15 @@
+[Unit]
+Description=ntfy push notification server (tailnet only)
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=ntfy
+Group=ntfy
+ExecStart=/usr/local/bin/ntfy serve --config /etc/ntfy/server.yml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

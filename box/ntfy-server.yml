@@ -1,0 +1,8 @@
+# Bound to the Tailscale interface only — never the public one.
+base-url: "http://herdr-1:2586"
+listen-http: "100.75.93.117:2586"
+cache-file: "/var/cache/ntfy/cache.db"
+cache-duration: "72h"
+attachment-cache-dir: "/var/cache/ntfy/attachments"
+auth-file: "/var/lib/ntfy/user.db"
+auth-default-access: "read-write"
