@@ -12,10 +12,13 @@ happens to hold the primary branch.
 ## Usage
 
 ```
-dev                     pick a worktree, then choose what to do with it
-                          enter / →  open the action menu
+dev                     browse worktrees with a live preview pane
+                          ↑ ↓        move, preview updates as you go
+                          → enter    open the action menu
+                          ← esc      back out of the menu / quit
                           ctrl-o     VS Code      ctrl-h  herdr
                           ctrl-p     preview      ctrl-e  env push
+                          ctrl-r     refresh
 dev ls                  list every worktree, with any servers it is running
 dev ps                  every listening server on the box, with preview URLs
 dev preview [query]     open a running server in the browser
@@ -30,7 +33,17 @@ dev env ls   [query]    key names present on the remote worktree
 dev env diff [query]    which keys are local-only vs remote-only
 ```
 
-A `●` in the listing marks a worktree that already has an open herdr workspace.
+A `●` marks a worktree with an open herdr workspace, `*n` uncommitted files, and
+`▶ port` a server it is running.
+
+The preview pane shows branch, HEAD, relative age and subject, working-tree
+state, ahead/behind against upstream, the herdr workspace, and any URLs the
+worktree is serving. It renders from the cached scan rather than hitting the box
+per keystroke, so arrowing through the list is instant. `ctrl-r` re-scans, and
+the cache refreshes automatically after any action that could change state.
+
+Navigation loops rather than exits: backing out of the action menu with `←`
+returns to the list, and finishing a non-terminal action returns there too.
 
 `dev code foo` and `dev herdr foo` skip the picker entirely when `foo` matches
 exactly one worktree, so they compose well with shell history.

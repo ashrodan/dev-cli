@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # dev — worktree-first navigator for the herdr dev box.
 #
-#   dev              pick a worktree
-#                      enter  = open the action menu
-#                      →      = open the action menu
-#                      ctrl-o = VS Code        ctrl-h = herdr
-#                      ctrl-p = preview        ctrl-e = env push
+#   dev              browse worktrees
+#                      ↑ ↓     move, preview updates live
+#                      → enter open the action menu
+#                      ←  esc  back out / quit
+#                      ctrl-o  VS Code     ctrl-h  herdr
+#                      ctrl-p  preview     ctrl-e  env push
+#                      ctrl-r  refresh
 #   dev ls           list every worktree, with any servers it is running
 #   dev ps           list listening servers on the box, with preview URLs
 #   dev new [repo] <branch> [--base ref]
@@ -28,57 +30,68 @@ WT_ROOT="${DEV_WT_ROOT:-$RHOME/worktrees}"
 SESSION="${DEV_SESSION:-default}"
 PROXY_HOST="${DEV_PROXY_HOST:-herdr-1.exe.xyz}"
 TS_HOST="${DEV_TS_HOST:-herdr-1}"
-PROXY_PORT="${DEV_PROXY_PORT:-8000}"      # the exe.dev designated port
+PROXY_PORT="${DEV_PROXY_PORT:-8000}"
 
 die()  { printf 'dev: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
 
 # --- remote scan -----------------------------------------------------------
-# One SSH round trip. Emits, tab separated:
-#   repo  branch  path  workspace_id  kind  ports
-# where ports is a comma list like "3000,4321l" ("l" = bound to localhost only,
-# so it is NOT reachable through the exe.dev proxy).
+# One SSH round trip. Tab separated:
+#   1 repo  2 branch  3 path  4 workspace  5 kind  6 ports
+#   7 sha   8 when    9 dirty 10 ahead    11 behind  12 subject
 scan() {
   ssh "$REMOTE" "RHOME='$RHOME' HERDR='$HERDR' bash -s" <<'REMOTE_EOF'
 set -uo pipefail
 export PATH="$RHOME/.local/bin:$PATH"
 
+repos=$(find "$RHOME" -maxdepth 3 -name .git \
+        -not -path '*/node_modules/*' -not -path "$RHOME/.*" \
+        -printf '%h\n' 2>/dev/null | sort -u)
+
 {
-  find "$RHOME" -maxdepth 3 -name .git \
-       -not -path '*/node_modules/*' -not -path "$RHOME/.*" \
-       -printf '%h\n' 2>/dev/null | sort -u | while read -r repo; do
-    "$HERDR" worktree list --cwd "$repo" 2>/dev/null
-  done
+  for repo in $repos; do "$HERDR" worktree list --cwd "$repo" 2>/dev/null; done
 
   echo '---PORTS---'
-
-  # listening sockets -> owning process cwd
   ss -tlnpH 2>/dev/null | while read -r line; do
     addr=$(printf '%s' "$line" | awk '{print $4}')
-    port=${addr##*:}
-    host=${addr%:*}
+    port=${addr##*:}; host=${addr%:*}
     pid=$(printf '%s' "$line" | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2)
     [ -z "$pid" ] && continue
     cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
     cmd=$(tr -d '\0' < "/proc/$pid/comm" 2>/dev/null)
-    case "$host" in
-      127.0.0.1|'[::1]') scope=l ;;
-      *)                 scope=g ;;
-    esac
+    case "$host" in 127.0.0.1|'[::1]') scope=l ;; *) scope=g ;; esac
     printf '%s\t%s\t%s\t%s\n' "$port" "$scope" "$cwd" "$cmd"
+  done
+
+  echo '---GIT---'
+  for repo in $repos; do
+    git -C "$repo" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2}' |
+    while read -r wt; do
+      sha=$(git -C "$wt" log -1 --format=%h 2>/dev/null)
+      when=$(git -C "$wt" log -1 --format=%cr 2>/dev/null)
+      subj=$(git -C "$wt" log -1 --format=%s 2>/dev/null | tr '\t|' '  ' | cut -c1-68)
+      dirty=$(git -C "$wt" status --porcelain 2>/dev/null | grep -c . || true)
+      ab=$(git -C "$wt" rev-list --count --left-right '@{u}...HEAD' 2>/dev/null || printf '0\t0')
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$wt" "$sha" "$when" "$dirty" \
+        "$(printf '%s' "$ab" | cut -f2)" "$(printf '%s' "$ab" | cut -f1)" "$subj"
+    done
   done
 } | python3 -c '
 import json, sys
 
-raw = sys.stdin.read().split("---PORTS---")
-wt_lines  = raw[0].splitlines()
-port_lines = raw[1].splitlines() if len(raw) > 1 else []
+blocks = sys.stdin.read().split("---PORTS---")
+wt_lines = blocks[0].splitlines()
+rest     = blocks[1] if len(blocks) > 1 else ""
+pblock, _, gblock = rest.partition("---GIT---")
 
-servers = []
-for line in port_lines:
-    parts = line.split("\t")
-    if len(parts) == 4:
-        servers.append(parts)          # port, scope, cwd, cmd
+servers = [p.split("\t") for p in pblock.splitlines() if p.count("\t") == 3]
+
+meta = {}
+for line in gblock.splitlines():
+    f = line.split("\t")
+    if len(f) == 7:
+        meta[f[0]] = f[1:]
 
 worktrees, seen = [], set()
 for line in wt_lines:
@@ -99,43 +112,71 @@ for line in wt_lines:
                           w.get("open_workspace_id") or "",
                           "linked" if w.get("is_linked_worktree") else "main"))
 
-# longest-path-wins, so a server in a worktree is not also claimed by its repo
 for repo, branch, path, ws, kind in sorted(worktrees, key=lambda r: -len(r[2])):
-    ports = []
-    for port, scope, cwd, cmd in servers:
-        if cwd == path or cwd.startswith(path.rstrip("/") + "/"):
-            ports.append(port + ("l" if scope == "l" else ""))
-    print("\t".join([repo, branch, path, ws, kind, ",".join(sorted(set(ports)))]))
+    ports = sorted({p + ("l" if s == "l" else "")
+                    for p, s, cwd, _ in servers
+                    if cwd == path or cwd.startswith(path.rstrip("/") + "/")})
+    m = meta.get(path, ["", "", "0", "0", "0", ""])
+    print("\t".join([repo, branch, path, ws, kind, ",".join(ports)] + m))
 
-# anything listening that belongs to no worktree
 sys.stderr.write("".join(
     "ORPHAN\t%s\t%s\t%s\t%s\n" % (p, s, c, m)
     for p, s, c, m in servers
-    if not any(c == w[2] or c.startswith(w[2].rstrip("/") + "/") for w in worktrees)
-))
+    if not any(c == w[2] or c.startswith(w[2].rstrip("/") + "/") for w in worktrees)))
 '
 REMOTE_EOF
 }
 
-url_for() {  # port -> best URL for the operator
+url_for() {
   local p="${1%l}"
-  if [ "${1: -1}" = l ]; then
-    printf 'http://127.0.0.1:%s/  (localhost-bound — not reachable)\n' "$p"
-  elif [ "$p" = "$PROXY_PORT" ]; then
-    printf 'https://%s/\n' "$PROXY_HOST"
-  elif [ "$p" -ge 3000 ] 2>/dev/null && [ "$p" -le 9999 ]; then
-    printf 'https://%s:%s/\n' "$PROXY_HOST" "$p"
-  else
-    printf 'http://%s:%s/\n' "$TS_HOST" "$p"
-  fi
+  if [ "${1: -1}" = l ]; then printf 'http://127.0.0.1:%s/\n' "$p"
+  elif [ "$p" = "$PROXY_PORT" ]; then printf 'https://%s/\n' "$PROXY_HOST"
+  elif [ "$p" -ge 3000 ] 2>/dev/null && [ "$p" -le 9999 ]; then printf 'https://%s:%s/\n' "$PROXY_HOST" "$p"
+  else printf 'http://%s:%s/\n' "$TS_HOST" "$p"; fi
 }
 
-fmt() {  # TSV -> aligned display; path is always the last field
+fmt() {
   awk -F'\t' '{
-    mark = ($4 == "" ? "  " : "● ")
-    srv  = ($6 == "" ? "" : "  ▶ " $6)
-    printf "%s%-13s  %-32s  %-6s%s\t%s\n", mark, $1, $2, $5, srv, $3
-  }' | awk -F'\t' '{ printf "%-78s %s\n", $1, $2 }'
+    mark  = ($4 == "" ? "  " : "\033[32m●\033[0m ")
+    srv   = ($6 == "" ? "        " : sprintf("\033[36m▶ %-6s\033[0m", $6))
+    dirty = ($9 + 0 > 0 ? sprintf("\033[33m*%-3s\033[0m", $9) : "    ")
+    printf "%s%-13s  \033[1m%-34s\033[0m %s %s %s\n", mark, $1, $2, dirty, srv, $3
+  }'
+}
+
+# --- live preview pane -----------------------------------------------------
+# Rendered from the cached scan, so arrowing through the list costs nothing.
+cmd_pane() {
+  local path="$1" cache="${DEV_CACHE:-}"
+  [ -n "$cache" ] && [ -f "$cache" ] || return 0
+  awk -F'\t' -v p="$path" '$3==p' "$cache" |
+  while IFS=$'\t' read -r repo branch wpath ws kind ports sha when dirty ahead behind subject; do
+    printf '\033[1;37m%s\033[0m  \033[2m%s\033[0m\n\n' "$repo" "$kind"
+    printf '  \033[2mbranch\033[0m   \033[1m%s\033[0m\n' "$branch"
+    printf '  \033[2mpath\033[0m     %s\n' "$wpath"
+    [ -n "$sha" ] && printf '  \033[2mhead\033[0m     %s  \033[2m%s\033[0m\n           %s\n' "$sha" "$when" "$subject"
+
+    printf '\n'
+    if [ "${dirty:-0}" -gt 0 ] 2>/dev/null; then
+      printf '  \033[33m● %s uncommitted file(s)\033[0m\n' "$dirty"
+    else
+      printf '  \033[32m● clean\033[0m\n'
+    fi
+    [ "${ahead:-0}" -gt 0 ] 2>/dev/null  && printf '  \033[36m↑ %s ahead of upstream\033[0m\n' "$ahead"
+    [ "${behind:-0}" -gt 0 ] 2>/dev/null && printf '  \033[35m↓ %s behind upstream\033[0m\n' "$behind"
+    [ -n "$ws" ] && printf '  \033[32m● herdr workspace %s open\033[0m\n' "$ws"
+
+    if [ -n "$ports" ]; then
+      printf '\n  \033[1mserving\033[0m\n'
+      for p in $(printf '%s' "$ports" | tr ',' ' '); do
+        if [ "${p: -1}" = l ]; then
+          printf '    %-6s \033[31mlocalhost-bound, not reachable\033[0m\n' "${p%l}"
+        else
+          printf '    %-6s \033[4m%s\033[0m\n' "$p" "$(url_for "$p")"
+        fi
+      done
+    fi
+  done
 }
 
 # --- actions ---------------------------------------------------------------
@@ -156,7 +197,7 @@ except Exception: print("")' 2>/dev/null)
 
 open_shell() { exec ssh -t "$REMOTE" "cd '$1' && exec \$SHELL -l"; }
 
-open_preview() {  # path, ports-csv
+open_preview() {
   local path="$1" ports="$2" choice port url
   if [ -z "$ports" ]; then
     printf 'dev: nothing listening in %s\n' "$path" >&2
@@ -172,22 +213,23 @@ open_preview() {  # path, ports-csv
   else
     port="$ports"
   fi
-  url=$(url_for "$port" | awk '{print $1}')
-  case "$port" in
-    *l) printf 'dev: port %s is bound to 127.0.0.1 on the box — unreachable.\n' "${port%l}" >&2
-        printf '     restart it with --host 0.0.0.0\n' >&2; return 1 ;;
-  esac
+  if [ "${port: -1}" = l ]; then
+    printf 'dev: port %s is bound to 127.0.0.1 on the box, so the proxy cannot see it.\n' "${port%l}" >&2
+    printf '     restart it with --host 0.0.0.0\n' >&2
+    return 1
+  fi
+  url=$(url_for "$port")
   printf 'dev: opening %s\n' "$url"
   open "$url"
 }
 
 # --- action menu -----------------------------------------------------------
-action_menu() {  # path, ports
+# Returns 1 when the user backs out, so the caller can redraw the list.
+action_menu() {
   need fzf
-  local path="$1" ports="$2" srv="none"
+  local path="$1" ports="$2" srv="none" out key choice
   [ -n "$ports" ] && srv="$ports"
-  local pick
-  pick=$(printf '%s\n' \
+  out=$(printf '%s\n' \
     "herdr    attach the herdr session here" \
     "code     open in VS Code (Remote-SSH)" \
     "preview  open a running server ($srv)" \
@@ -195,9 +237,14 @@ action_menu() {  # path, ports
     "ask      ask an agent, in this directory" \
     "shell    plain ssh shell here" \
     "rm       remove this worktree" |
-    fzf --prompt='action> ' --reverse --height=35% \
-        --header="$(basename "$path")  —  $path") || return 1
-  case "${pick%% *}" in
+    fzf --prompt='action> ' --reverse --height=35% --expect=left,esc \
+        --header="$(basename "$path")  —  ← back") || return 1
+  key=$(printf '%s\n' "$out" | sed -n 1p)
+  choice=$(printf '%s\n' "$out" | sed -n 2p)
+  case "$key" in left|esc) return 1 ;; esac
+  [ -z "$choice" ] && return 1
+
+  case "${choice%% *}" in
     herdr)   open_herdr "$path" ;;
     code)    open_code "$path" ;;
     preview) open_preview "$path" "$ports" ;;
@@ -206,40 +253,49 @@ action_menu() {  # path, ports
     shell)   open_shell "$path" ;;
     rm)      rm_worktree "$path" ;;
   esac
+  return 0
 }
 
 # --- picker ----------------------------------------------------------------
-# Echoes "KEY<TAB>PATH<TAB>PORTS". Callers must NOT rely on a global, because
-# $( ) runs this in a subshell and any variable set here would be discarded.
+# NOTE: pick() runs inside $( ), i.e. a subshell — anything it assigns to a
+# global is discarded. It therefore *prints* its result and resolve() unpacks it
+# in the calling shell. This is what previously broke every non-default key.
+CACHE=""
+cleanup() { [ -n "$CACHE" ] && rm -f "$CACHE"; }
+trap cleanup EXIT
+
+refresh_cache() {
+  [ -z "$CACHE" ] && CACHE=$(mktemp "${TMPDIR:-/tmp}/dev-scan.XXXXXX")
+  scan 2>/dev/null > "$CACHE" || die "could not reach $REMOTE"
+  export DEV_CACHE="$CACHE"
+  [ -s "$CACHE" ] || die "no git repositories found under $RHOME"
+}
+
 pick() {
   need fzf
-  local rows out key line path ports
-  rows=$(scan 2>/dev/null) || die "could not reach $REMOTE"
-  [ -z "$rows" ] && die "no git repositories found under $RHOME"
-
-  if [ -n "${1:-}" ]; then                      # unique match skips the picker
-    local hit
-    hit=$(printf '%s\n' "$rows" | grep -i -- "$1" || true)
+  local out key line path ports
+  if [ -n "${1:-}" ]; then
+    local hit; hit=$(grep -i -- "$1" "$CACHE" || true)
     if [ "$(printf '%s\n' "$hit" | grep -c .)" = 1 ]; then
       printf '\t%s\t%s\n' "$(printf '%s' "$hit" | cut -f3)" "$(printf '%s' "$hit" | cut -f6)"
       return 0
     fi
   fi
 
-  out=$(printf '%s\n' "$rows" | fmt |
-        fzf --prompt='worktree> ' --reverse --height=45% --query="${1:-}" \
-            --header='enter/→ menu   ctrl-o code   ctrl-h herdr   ctrl-p preview   ctrl-e env' \
-            --expect=right,ctrl-o,ctrl-h,ctrl-p,ctrl-e) || return 1
+  out=$(fmt < "$CACHE" |
+        fzf --ansi --reverse --height=100% --prompt='worktree> ' --query="${1:-}" \
+            --header='↑↓ move   →/enter menu   ctrl-o code   ctrl-h herdr   ctrl-p preview   ctrl-e env   ctrl-r refresh' \
+            --preview="$0 _pane {-1}" --preview-window='right,52%,border-left,wrap' \
+            --expect=right,ctrl-o,ctrl-h,ctrl-p,ctrl-e,ctrl-r) || return 1
 
   key=$(printf '%s\n' "$out" | sed -n 1p)
   line=$(printf '%s\n' "$out" | sed -n 2p)
   [ -z "$line" ] && return 1
   path=$(printf '%s' "$line" | awk '{print $NF}')
-  ports=$(printf '%s\n' "$rows" | awk -F'\t' -v p="$path" '$3==p{print $6}')
+  ports=$(awk -F'\t' -v p="$path" '$3==p{print $6}' "$CACHE")
   printf '%s\t%s\t%s\n' "$key" "$path" "$ports"
 }
 
-# resolve() sets REPLY_KEY / REPLY_PATH / REPLY_PORTS in the *current* shell
 REPLY_KEY=""; REPLY_PATH=""; REPLY_PORTS=""
 resolve() {
   local r; r=$(pick "${1:-}") || return 1
@@ -249,27 +305,42 @@ resolve() {
   [ -n "$REPLY_PATH" ]
 }
 
-# --- subcommands -----------------------------------------------------------
-cmd_ls() {
-  local rows; rows=$(scan 2>/dev/null) || die "could not reach $REMOTE"
-  [ -z "$rows" ] && { echo "no worktrees found"; return 0; }
-  printf '%s\n' "$rows" | fmt
+# --- browse loop -----------------------------------------------------------
+browse() {
+  refresh_cache
+  while true; do
+    resolve "${1:-}" || return 0
+    set --                                   # query applies to the first pass only
+    case "$REPLY_KEY" in
+      ctrl-r) refresh_cache; continue ;;
+      ctrl-o) open_code    "$REPLY_PATH" ;;
+      ctrl-h) open_herdr   "$REPLY_PATH" ;;   # exec, never returns
+      ctrl-p) open_preview "$REPLY_PATH" "$REPLY_PORTS" || true ;;
+      ctrl-e) cmd_env push -p "$REPLY_PATH" ;;
+      *)      action_menu  "$REPLY_PATH" "$REPLY_PORTS" || continue ;;
+    esac
+    refresh_cache                            # state may have changed
+  done
 }
+
+# --- subcommands -----------------------------------------------------------
+cmd_ls() { refresh_cache; fmt < "$CACHE"; }
 
 cmd_ps() {
   local orphans; orphans=$(scan 2>&1 >/dev/null | grep '^ORPHAN' || true)
-  local rows;    rows=$(scan 2>/dev/null)
+  refresh_cache
   echo "servers in worktrees"
-  printf '%s\n' "$rows" | awk -F'\t' '$6!=""' | while IFS=$'\t' read -r repo branch path ws kind ports; do
+  awk -F'\t' '$6!=""' "$CACHE" | while IFS=$'\t' read -r repo branch path rest; do
+    ports=$(awk -F'\t' -v p="$path" '$3==p{print $6}' "$CACHE")
     for p in $(printf '%s' "$ports" | tr ',' ' '); do
-      printf '  %-13s %-22s %s\n' "$repo" "${p%l}" "$(url_for "$p")"
+      printf '  %-13s %-8s %s\n' "$repo" "${p%l}" "$(url_for "$p")"
     done
   done
   [ -n "$orphans" ] && {
     echo "other listeners"
     printf '%s\n' "$orphans" | while IFS=$'\t' read -r _ port scope cwd cmd; do
       [ "$scope" = l ] && continue
-      printf '  %-13s %-22s %s\n' "$cmd" "$port" "$(url_for "$port")"
+      printf '  %-13s %-8s %s\n' "$cmd" "$port" "$(url_for "$port")"
     done
   }
   return 0
@@ -288,10 +359,10 @@ cmd_new() {
   [ -z "$branch" ] && { branch="$repo"; repo=""; }
   [ -z "$branch" ] && die "usage: dev new [repo] <branch> [--base ref]"
 
+  refresh_cache
   if [ -z "$repo" ]; then
     need fzf
-    local rows; rows=$(scan 2>/dev/null) || die "could not reach $REMOTE"
-    repo=$(printf '%s\n' "$rows" | awk -F'\t' '$5=="main"{print $1"\t"$3}' | sort -u |
+    repo=$(awk -F'\t' '$5=="main"{print $1"\t"$3}' "$CACHE" | sort -u |
            fzf --prompt='repo> ' --reverse --height=30% --with-nth=1 --delimiter='\t') || return 1
     repo=$(printf '%s' "$repo" | cut -f2)
   fi
@@ -300,7 +371,6 @@ cmd_new() {
   local slug path
   slug=$(printf '%s' "$branch" | tr '/' '-')
   path="$WT_ROOT/$(basename "$repo")/$slug"
-
   local args="--cwd '$repo' --branch '$branch' --path '$path' --focus"
   [ -n "$base" ] && args="$args --base '$base'"
 
@@ -311,7 +381,7 @@ cmd_new() {
 
 rm_worktree() {
   local path="$1" ws
-  ws=$(scan 2>/dev/null | awk -F'\t' -v p="$path" '$3==p{print $4}')
+  ws=$(awk -F'\t' -v p="$path" '$3==p{print $4}' "$CACHE")
   printf 'Remove worktree %s? [y/N] ' "$path"
   read -r ans; [ "$ans" = y ] || [ "$ans" = Y ] || { echo "aborted"; return 1; }
   [ -z "$ws" ] && die "not open as a workspace; open it first (dev herdr)"
@@ -383,6 +453,7 @@ cmd_env() {
     esac
   done
   if [ -z "$target" ]; then
+    refresh_cache
     resolve "$query" || return 1
     target="$REPLY_PATH"
   fi
@@ -453,6 +524,7 @@ cmd_ask() {
   esac
 
   if [ -z "$path" ]; then
+    refresh_cache
     resolve "$query" || return 1
     path="$REPLY_PATH"
   fi
@@ -467,25 +539,18 @@ cmd_ask() {
 # --- main ------------------------------------------------------------------
 main() {
   case "${1:-}" in
+    _pane)     shift; cmd_pane "$@" ;;          # internal: fzf preview
     ls|list)   shift; cmd_ls "$@" ;;
     ps)        shift; cmd_ps "$@" ;;
     new|add)   shift; cmd_new "$@" ;;
     env)       shift; cmd_env "$@" ;;
     ask|\?)    shift; cmd_ask "$@" ;;
-    rm|remove) shift; resolve "${1:-}" && rm_worktree "$REPLY_PATH" ;;
-    code)      shift; resolve "${1:-}" && open_code "$REPLY_PATH" ;;
-    herdr|h)   shift; resolve "${1:-}" && open_herdr "$REPLY_PATH" ;;
-    preview|p) shift; resolve "${1:-}" && open_preview "$REPLY_PATH" "$REPLY_PORTS" ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
-    *)
-      resolve "${1:-}" || exit 0
-      case "$REPLY_KEY" in
-        ctrl-o) open_code    "$REPLY_PATH" ;;
-        ctrl-h) open_herdr   "$REPLY_PATH" ;;
-        ctrl-p) open_preview "$REPLY_PATH" "$REPLY_PORTS" ;;
-        ctrl-e) cmd_env push -p "$REPLY_PATH" ;;
-        *)      action_menu  "$REPLY_PATH" "$REPLY_PORTS" ;;
-      esac ;;
+    rm|remove) shift; refresh_cache; resolve "${1:-}" && rm_worktree "$REPLY_PATH" ;;
+    code)      shift; refresh_cache; resolve "${1:-}" && open_code "$REPLY_PATH" ;;
+    herdr|h)   shift; refresh_cache; resolve "${1:-}" && open_herdr "$REPLY_PATH" ;;
+    preview|p) shift; refresh_cache; resolve "${1:-}" && open_preview "$REPLY_PATH" "$REPLY_PORTS" ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)         browse "${1:-}" ;;
   esac
 }
 
