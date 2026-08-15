@@ -123,12 +123,15 @@ Host dai
 | `DEV_REMOTE_HOME` | `/home/exedev` | Remote home, where repos are searched |
 | `DEV_WT_ROOT` | `$DEV_REMOTE_HOME/worktrees` | Where new worktrees are created |
 | `DEV_SESSION` | `default` | herdr session to attach |
+| `DEV_PROXY_HOST` | `herdr-1.exe.xyz` | hostname the exe.dev proxy serves |
+| `DEV_PROXY_PORT` | `8000` | the designated port, served at the bare hostname |
+| `DEV_TS_HOST` | `herdr-1` | Tailscale/MagicDNS name, used for ports outside 3000-9999 |
 
 ## Install
 
 ```sh
-git clone https://github.com/ashrodan/dev-cli.git ~/dev-cli
-ln -s ~/dev-cli/dev ~/.local/bin/dev
+git clone https://github.com/ashrodan/dev-cli.git ~/dev/dev-cli
+ln -s ~/dev/dev-cli/dev ~/.local/bin/dev
 ```
 
 ## Notes
