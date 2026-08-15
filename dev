@@ -149,8 +149,12 @@ fmt() {
 cmd_pane() {
   local path="$1" cache="${DEV_CACHE:-}"
   [ -n "$cache" ] && [ -f "$cache" ] || return 0
-  awk -F'\t' -v p="$path" '$3==p' "$cache" |
-  while IFS=$'\t' read -r repo branch wpath ws kind ports sha when dirty ahead behind subject; do
+  # Tab is an IFS *whitespace* character, so `IFS=$'\t' read` collapses runs of
+  # tabs and drops empty fields — a row with no open workspace or no listening
+  # ports would shift every later field left and render nonsense. \037 is not
+  # whitespace, so each occurrence delimits exactly one field.
+  awk -F'\t' -v p="$path" '$3==p' "$cache" | tr '\t' '\037' |
+  while IFS=$'\037' read -r repo branch wpath ws kind ports sha when dirty ahead behind subject; do
     printf '\033[1;37m%s\033[0m  \033[2m%s\033[0m\n\n' "$repo" "$kind"
     printf '  \033[2mbranch\033[0m   \033[1m%s\033[0m\n' "$branch"
     printf '  \033[2mpath\033[0m     %s\n' "$wpath"
@@ -330,15 +334,15 @@ cmd_ps() {
   local orphans; orphans=$(scan 2>&1 >/dev/null | grep '^ORPHAN' || true)
   refresh_cache
   echo "servers in worktrees"
-  awk -F'\t' '$6!=""' "$CACHE" | while IFS=$'\t' read -r repo branch path rest; do
-    ports=$(awk -F'\t' -v p="$path" '$3==p{print $6}' "$CACHE")
+  awk -F'\t' '$6!=""{print $1 "\037" $6}' "$CACHE" | while IFS=$'\037' read -r repo ports; do
     for p in $(printf '%s' "$ports" | tr ',' ' '); do
       printf '  %-13s %-8s %s\n' "$repo" "${p%l}" "$(url_for "$p")"
     done
   done
   [ -n "$orphans" ] && {
     echo "other listeners"
-    printf '%s\n' "$orphans" | while IFS=$'\t' read -r _ port scope cwd cmd; do
+    printf '%s\n' "$orphans" | tr '\t' '\037' |
+    while IFS=$'\037' read -r _ port scope cwd cmd; do
       [ "$scope" = l ] && continue
       printf '  %-13s %-8s %s\n' "$cmd" "$port" "$(url_for "$port")"
     done
