@@ -104,7 +104,35 @@ grok reads `~/.claude/` on its own. The home-level symlink matters: without it,
 omp and shelley run with no awareness of the box at all — including the rules
 about binding `0.0.0.0` and never publishing a share.
 
-## 6. Taildrop inbox
+## 6. Skills
+
+Agents ship with no skills by default — a fresh box runs `claude` without even
+`using-exe-dev`, which is the one it most needs there. Skills live in
+[ashrodan/ar-agent-skills](https://github.com/ashrodan/ar-agent-skills), in the
+open `SKILL.md` format, so one repo serves Claude, Codex and anything reading a
+skills directory.
+
+```sh
+ssh exe.dev "integrations add github --name ar-agent-skills \
+  --repository ashrodan/ar-agent-skills --attach vm:<vm>"
+
+ssh <vm> 'git clone https://github.int.exe.xyz/ashrodan/ar-agent-skills.git && \
+          cd ar-agent-skills && ./install.sh'
+```
+
+`install.sh` symlinks rather than copies, so `git pull` in the clone updates
+every tool at once. It populates:
+
+```
+~/.claude/skills     29 skills
+~/.codex/skills      29 skills, plus 25 prompts and 20 agent .toml configs
+~/.agents/skills     29 skills   (generic, for anything else)
+```
+
+Claude Code can alternatively consume it as a plugin marketplace:
+`/plugin marketplace add ashrodan/ar-agent-skills`.
+
+## 7. Taildrop inbox
 
 Files sent from a phone share sheet land automatically:
 
@@ -117,7 +145,7 @@ Requires `sudo tailscale set --operator=exedev` first, or the CLI needs root.
 `drop -i` then prints the newest image path to hand to an agent — much better
 than pasting image data through an SSH session.
 
-## 7. Notifications
+## 8. Notifications
 
 See [box/README.md](../box/README.md) for the detail. In short:
 
@@ -137,7 +165,7 @@ Environment=AGENT_NOTIFY_CLICK=termius://
 Environment=AGENT_ACTION_URL=http://<tailscale-ip>:2587
 ```
 
-## 8. GitHub
+## 9. GitHub
 
 Never put a personal access token on a box. Attach an integration and clone
 through the proxy hostname:
