@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# drop — print the path of the most recent file Taildropped into ~/inbox.
+# Phone: share sheet -> Tailscale -> herdr-1. Then paste this path to an agent.
+#   drop        newest file
+#   drop -n 5   five newest
+#   drop -i     newest image only
+set -euo pipefail
+INBOX="${DROP_INBOX:-$HOME/inbox}"
+n=1; pat=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n) n="$2"; shift 2 ;;
+    -i) pat="-iregex .*\.\(png\|jpg\|jpeg\|gif\|webp\|heic\|pdf\)"; shift ;;
+    *) shift ;;
+  esac
+done
+# shellcheck disable=SC2086
+find "$INBOX" -maxdepth 1 -type f $pat -printf "%T@ %p\n" 2>/dev/null |
+  sort -rn | head -n "$n" | cut -d" " -f2-

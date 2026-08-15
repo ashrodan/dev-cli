@@ -1,0 +1,17 @@
+[Unit]
+Description=Push a notification when a herdr agent needs input or finishes
+After=herdr.service network-online.target
+Wants=herdr.service
+
+[Service]
+Type=simple
+User=exedev
+Group=exedev
+Environment=HOME=/home/exedev
+Environment=PATH=/home/exedev/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/exedev/.local/bin/agent-notify
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

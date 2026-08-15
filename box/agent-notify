@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""agent-notify — push a notification when a herdr agent needs you or finishes.
+
+Polls `herdr agent list` and watches for state transitions. herdr's agent-state
+hooks (claude, codex, grok, omp, pi) keep those states accurate, so this only has
+to diff them.
+
+Notifies on:
+  working -> blocked        the agent is waiting on you
+  working -> idle | done    the agent finished
+
+Deliberately silent on idle -> working and anything involving `unknown`, which
+flaps when a pane is redrawing.
+
+Delivery is the exe.dev notify integration, which pushes to every device signed
+into the exe.dev app. No credential lives here: the integration proxy injects it.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HERDR = os.environ.get("AGENT_NOTIFY_HERDR", os.path.expanduser("~/.local/bin/herdr"))
+NOTIFY_URL = os.environ.get("AGENT_NOTIFY_URL", "https://notify-2.int.exe.xyz/")
+POLL_SECONDS = float(os.environ.get("AGENT_NOTIFY_POLL", "5"))
+HOST = os.environ.get("AGENT_NOTIFY_HOST", os.uname().nodename)
+
+# transitions worth waking a phone for
+ALERT_ON = {
+    "blocked": "needs you",
+    "idle": "finished",
+    "done": "finished",
+}
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def agents():
+    """Current agent panes, keyed by pane_id."""
+    try:
+        out = subprocess.run(
+            [HERDR, "agent", "list"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        log(f"herdr agent list failed: {e}")
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        result = json.loads(out.stdout).get("result", {})
+    except json.JSONDecodeError:
+        return None
+
+    found = {}
+    for a in result.get("agents", []):
+        pane = a.get("pane_id")
+        if not pane:
+            continue
+        title = (a.get("terminal_title_stripped") or "").strip()
+        # omp/pi prefix titles with the model glyph and a caret
+        for sep in (" > ", "> "):
+            if sep in title:
+                title = title.split(sep, 1)[1].strip()
+                break
+        found[pane] = {
+            "agent": a.get("agent") or "agent",
+            "status": a.get("agent_status") or "unknown",
+            "cwd": os.path.basename((a.get("cwd") or "").rstrip("/")) or "~",
+            "title": title,
+            "workspace": a.get("workspace_id") or "",
+        }
+    return found
+
+
+def notify(title, message):
+    payload = json.dumps({"title": title, "message": message}).encode()
+    req = urllib.request.Request(
+        NOTIFY_URL, data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = resp.read().decode()
+        log(f"sent: {title} — {message}  ({body.strip()})")
+    except urllib.error.URLError as e:
+        log(f"notify failed: {e}")
+
+
+def main():
+    previous = {}
+    first_pass = True
+
+    while True:
+        current = agents()
+        if current is None:
+            time.sleep(POLL_SECONDS)
+            continue
+
+        if first_pass:
+            # adopt the current state silently, or restarting the service would
+            # fire a notification for every agent already sitting idle
+            previous = {k: v["status"] for k, v in current.items()}
+            first_pass = False
+            log(f"watching {len(current)} agent(s) on {HOST}")
+            time.sleep(POLL_SECONDS)
+            continue
+
+        for pane, info in current.items():
+            was = previous.get(pane)
+            now = info["status"]
+            if was == now:
+                continue
+            previous[pane] = now
+
+            # only care about leaving `working` for a state that wants attention
+            if was == "working" and now in ALERT_ON:
+                what = ALERT_ON[now]
+                title = f"{info['agent']} · {info['cwd']} — {what}"
+                message = info["title"] or f"workspace {info['workspace']}"
+                notify(title, message)
+
+        # forget panes that have gone away
+        for pane in list(previous):
+            if pane not in current:
+                del previous[pane]
+
+        time.sleep(POLL_SECONDS)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
