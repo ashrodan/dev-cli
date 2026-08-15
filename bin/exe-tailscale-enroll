@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# exe-tailscale-enroll — join every exe.dev VM tagged `tailscale` to the tailnet.
+#
+#   exe-tailscale-enroll             enrol all tagged VMs that are not yet joined
+#   exe-tailscale-enroll --tag NAME  use a different tag (default: tailscale)
+#   exe-tailscale-enroll --dry-run   show what would happen
+#
+# Prerequisites, done once:
+#   ssh exe.dev "tag <vm> tailscale"
+#   ssh exe.dev "integrations attach tailscale tag:tailscale"
+#
+# Each VM mints its own single-use, 10-minute auth key through the exe.dev
+# integration proxy, so no Tailscale credential is ever held on this machine or
+# written to any VM's disk. Already-joined VMs are skipped.
+
+set -euo pipefail
+
+TAG="tailscale"
+DRY=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --tag)     TAG="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "exe-tailscale-enroll: unknown option $1" >&2; exit 1 ;;
+  esac
+done
+
+vms=$(ssh exe.dev "ls --json" | TAG="$TAG" python3 -c '
+import json, os, sys
+tag = os.environ["TAG"]
+d = json.load(sys.stdin)
+vms = d if isinstance(d, list) else d.get("vms", d)
+for v in vms:
+    if tag in (v.get("tags") or []) and v.get("status") == "running":
+        print("%s\t%s" % (v.get("vm_name", ""), v.get("ssh_host", "")))
+')
+
+if [ -z "$vms" ]; then
+  echo "no running VMs tagged '$TAG'"
+  echo "tag one with:  ssh exe.dev \"tag <vm> $TAG\""
+  exit 0
+fi
+
+printf 'VMs tagged %s:\n' "$TAG"
+printf '%s\n' "$vms" | while IFS=$'\t' read -r name host; do printf '  %s\n' "$name"; done
+
+[ "$DRY" = 1 ] && { echo; echo "(dry run — nothing changed)"; exit 0; }
+
+printf '%s\n' "$vms" | while IFS=$'\t' read -r name host; do
+  [ -z "$host" ] && host="$name.exe.xyz"
+  printf '\n== %s ==\n' "$name"
+
+  ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 "$host" \
+      "VM='$name' bash -s" <<'REMOTE_EOF' || echo "  ! failed"
+set -uo pipefail
+
+if ! command -v tailscale >/dev/null; then
+  echo "  ! tailscale not installed on this image — skipping"
+  exit 1
+fi
+
+if tailscale status >/dev/null 2>&1; then
+  echo "  already on the tailnet: $(tailscale ip -4 2>/dev/null | head -1)"
+  exit 0
+fi
+
+# The integration proxy injects the API credential at the edge; the key it
+# returns is single-use and expires in 10 minutes.
+resp=$(curl -sS -X POST https://tailscale.int.exe.xyz/api/v2/tailnet/-/keys \
+  -H "Content-Type: application/json" \
+  -d '{"capabilities":{"devices":{"create":{"reusable":false,"ephemeral":false,"preauthorized":true}}},"expirySeconds":600,"description":"exe-tailscale-enroll"}' 2>/dev/null)
+
+key=$(printf '%s' "$resp" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin)["key"])
+except Exception: print("")' 2>/dev/null)
+unset resp
+
+if [ -z "$key" ]; then
+  echo "  ! could not mint an auth key — is the tailscale integration attached to this VM?"
+  exit 1
+fi
+
+# --accept-dns=false keeps the VM's own resolver, so *.int.exe.xyz integration
+# hostnames keep resolving.
+if sudo tailscale up --ssh --hostname="$VM" --accept-dns=false --authkey="$key" 2>&1 | sed 's/^/  /'; then
+  unset key
+  sudo tailscale set --operator="$(id -un)" 2>/dev/null || true
+  echo "  joined as $VM: $(tailscale ip -4 2>/dev/null | head -1)"
+else
+  unset key
+  echo "  ! tailscale up failed"
+  exit 1
+fi
+REMOTE_EOF
+done
+
+echo
+echo "refresh SSH hosts with:  tailnet-hosts"

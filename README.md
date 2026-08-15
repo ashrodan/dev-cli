@@ -115,6 +115,35 @@ This is a convenience over a plaintext file, not a secret manager. See
 [docs/secrets.md](docs/secrets.md) for the real design discussion and why
 runtime injection is not the same thing as isolation.
 
+## Tailnet host discovery
+
+Two helpers in `bin/`, for using the box (and its siblings) from other devices.
+
+`exe-tailscale-enroll` joins every exe.dev VM tagged `tailscale` to the tailnet.
+Each VM mints its own single-use, 10-minute auth key through the exe.dev
+integration proxy, so no Tailscale credential is held locally or written to any
+VM's disk. Already-joined VMs are skipped, so it is safe to re-run.
+
+```sh
+ssh exe.dev "tag <vm> tailscale"
+ssh exe.dev "integrations attach tailscale tag:tailscale"   # once
+exe-tailscale-enroll
+```
+
+`tailnet-hosts` then writes those hosts to `~/.ssh/config.d/tailnet` and ensures
+`~/.ssh/config` includes it. Termius imports from `~/.ssh/config`, and a Termius
+account syncs the result to your phone and tablet — so tagging a VM is the only
+manual step, and it shows up everywhere.
+
+```sh
+tailnet-hosts --dry-run
+tailnet-hosts
+```
+
+Only Linux peers are emitted; phones and tablets are skipped. Tailscale IPs are
+stable per device, so the generated entries do not depend on MagicDNS being
+applied on the client.
+
 ## Requirements
 
 Local: `bash`, `fzf`, `python3`, `ssh`, and the `code` CLI for the VS Code path.
