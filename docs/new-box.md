@@ -104,6 +104,20 @@ grok reads `~/.claude/` on its own. The home-level symlink matters: without it,
 omp and shelley run with no awareness of the box at all — including the rules
 about binding `0.0.0.0` and never publishing a share.
 
+That file also carries the working rules — finish the task, verify locally, ask
+before touching production, commit as you go, worktree off a dirty branch, draft
+PR for unfinished work, green CI before marking ready. The canonical copy is
+[docs/agent-rules.md](agent-rules.md); paste it in as a `## Working rules`
+section, since AGENTS.md has no include mechanism and the box has no clone of
+this repo:
+
+```sh
+scp docs/agent-rules.md <vm>:/tmp/
+ssh <vm> "sed '1s/^# /## /' /tmp/agent-rules.md >> ~/.config/shelley/AGENTS.md && rm /tmp/agent-rules.md"
+```
+
+Being a copy, it can drift — re-paste when the rules change.
+
 ## 6. Skills
 
 Agents ship with no skills by default — a fresh box runs `claude` without even

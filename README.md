@@ -207,6 +207,8 @@ ln -s ~/dev/dev-cli/skills/onboard-repo-to-box ~/.claude/skills/
 
 - [docs/new-box.md](docs/new-box.md) — runbook for bringing a fresh exe.dev VM to
   the same state, including the gotchas that cost time the first go
+- [docs/agent-rules.md](docs/agent-rules.md) — working rules every agent follows;
+  symlinked to `~/.claude/CLAUDE.md` here and pasted into the box's `AGENTS.md`
 - [docs/secrets.md](docs/secrets.md) — tabled decision on runtime secret injection
 - [box/README.md](box/README.md) — the scripts that live on the box
 
