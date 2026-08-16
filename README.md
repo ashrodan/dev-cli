@@ -187,6 +187,22 @@ git clone https://github.com/ashrodan/dev-cli.git ~/dev/dev-cli
 ln -s ~/dev/dev-cli/dev ~/.local/bin/dev
 ```
 
+## Skills
+
+[`skills/`](skills/) holds agent skills in the open `SKILL.md` format, so any
+tool that reads a skills directory can use them.
+
+- **onboard-repo-to-box** — clone one of your repos onto the box and move its
+  `.env` across. Covers the GitHub integration (so no token lands on the box),
+  the audit that catches variables which don't survive the move — path-valued
+  vars, localhost URLs, session-bound tokens — and the copy itself.
+
+Link them into whichever tool you use:
+
+```sh
+ln -s ~/dev/dev-cli/skills/onboard-repo-to-box ~/.claude/skills/
+```
+
 ## Docs
 
 - [docs/new-box.md](docs/new-box.md) — runbook for bringing a fresh exe.dev VM to
