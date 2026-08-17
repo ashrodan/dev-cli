@@ -6,6 +6,7 @@
 #                      → enter open the action menu
 #                      ←  esc  back out / quit
 #                      ctrl-o  VS Code     ctrl-h  herdr
+#                      ctrl-s  herdr, in a chosen or new session
 #                      ctrl-p  preview     ctrl-e  env push
 #                      ctrl-r  refresh
 #   dev ls           list every worktree, with any servers it is running
@@ -14,6 +15,9 @@
 #   dev rm   [query]
 #   dev code [query]                 open in VS Code
 #   dev herdr [query]                attach the herdr session there
+#   dev herdr -S [query]             ...picking the session first
+#   dev herdr -s NAME [query]        ...in a named session (created if new)
+#   dev sessions                     list herdr sessions on the box
 #   dev preview [query]              open a running server in the browser
 #   dev env push|ls|diff [query] [--from FILE]
 #   dev ask [-a agent] [-w query] [question...]
@@ -189,6 +193,41 @@ open_code() {
   code --remote "ssh-remote+$REMOTE" "$1" && printf 'dev: opened %s in VS Code\n' "$1"
 }
 
+# --- herdr sessions --------------------------------------------------------
+# A session is a whole independent herdr: its own socket, its own workspaces.
+# Tabs and workspaces are for multitasking inside one context; a second session
+# is for work you want isolated — a spike, a demo, something disposable.
+sessions_list() {
+  ssh "$REMOTE" "$HERDR session list --json 2>/dev/null" |
+  python3 -c 'import json,sys
+try: d = json.load(sys.stdin)
+except Exception: sys.exit(0)
+for x in d.get("sessions", []):
+    print("%s\t%s\t%s" % (x.get("name",""),
+                           "running" if x.get("running") else "stopped",
+                           "default" if x.get("default") else ""))' 2>/dev/null
+}
+
+# Prints the chosen session name on stdout; fails if the user backs out.
+pick_session() {
+  need fzf
+  local choice name
+  choice=$({ sessions_list | awk -F'\t' 'NF{printf "%-20s %-8s %s\n", $1, $2, $3}'
+             printf '%-20s %s\n' "+new" "start a fresh, isolated session"
+           } | fzf --prompt='session> ' --reverse --height=40% \
+                   --header='each session has its own workspaces   esc cancels') || return 1
+  name=$(printf '%s' "$choice" | awk '{print $1}')
+  if [ "$name" = "+new" ]; then
+    printf 'name for the new session: ' >&2
+    read -r name || return 1
+    # session names become directory names on the box
+    name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//; s/-*$//')
+    [ -n "$name" ] || { echo "dev: empty session name" >&2; return 1; }
+  fi
+  [ -n "$name" ] || return 1
+  printf '%s\n' "$name"
+}
+
 # --- terminal hygiene ------------------------------------------------------
 # A dropped SSH leaves the *remote* TUI's modes set on *our* terminal: alt
 # screen, hidden cursor, mouse reporting, bracketed paste, application keypad.
@@ -211,13 +250,16 @@ remote_tty() {
 }
 
 open_herdr() {
-  local path="$1" ws
-  ws=$(ssh "$REMOTE" "$HERDR worktree open --path '$path' 2>/dev/null" |
+  local path="$1" session="${2:-$SESSION}" ws
+  # Socket-API calls are per-session, so they must be scoped the same way the
+  # attach is. A session that does not exist yet simply returns nothing here —
+  # we attach anyway and it gets created empty.
+  ws=$(ssh "$REMOTE" "$HERDR --session $session worktree open --path '$path' 2>/dev/null" |
        python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("result",{}).get("workspace_id","") or "")
 except Exception: print("")' 2>/dev/null)
-  [ -n "$ws" ] && ssh "$REMOTE" "$HERDR workspace focus $ws" >/dev/null 2>&1
-  remote_tty "$HERDR --session $SESSION"
+  [ -n "$ws" ] && ssh "$REMOTE" "$HERDR --session $session workspace focus $ws" >/dev/null 2>&1
+  remote_tty "$HERDR --session $session"
 }
 
 open_shell() { remote_tty "cd '$1' && exec \$SHELL -l"; }
@@ -256,6 +298,7 @@ action_menu() {
   [ -n "$ports" ] && srv="$ports"
   out=$(printf '%s\n' \
     "herdr    attach the herdr session here" \
+    "session  attach here in another herdr session" \
     "code     open in VS Code (Remote-SSH)" \
     "preview  open a running server ($srv)" \
     "env      copy .env vars into this worktree" \
@@ -271,6 +314,7 @@ action_menu() {
 
   case "${choice%% *}" in
     herdr)   open_herdr "$path" ;;
+    session) local sess; sess=$(pick_session) || return 0; open_herdr "$path" "$sess" ;;
     code)    open_code "$path" ;;
     preview) open_preview "$path" "$ports" ;;
     env)     cmd_env push -p "$path" ;;
@@ -309,9 +353,9 @@ pick() {
 
   out=$(fmt < "$CACHE" |
         fzf --ansi --reverse --height=100% --prompt='worktree> ' --query="${1:-}" \
-            --header='↑↓ move   →/enter menu   ctrl-o code   ctrl-h herdr   ctrl-p preview   ctrl-e env   ctrl-r refresh' \
+            --header='↑↓ move   →/enter menu   ctrl-o code   ctrl-h herdr   ctrl-s session   ctrl-p preview   ctrl-e env   ctrl-r refresh' \
             --preview="$0 _pane {-1}" --preview-window='right,52%,border-left,wrap' \
-            --expect=right,ctrl-o,ctrl-h,ctrl-p,ctrl-e,ctrl-r) || return 1
+            --expect=right,ctrl-o,ctrl-h,ctrl-s,ctrl-p,ctrl-e,ctrl-r) || return 1
 
   key=$(printf '%s\n' "$out" | sed -n 1p)
   line=$(printf '%s\n' "$out" | sed -n 2p)
@@ -332,6 +376,7 @@ resolve() {
 
 # --- browse loop -----------------------------------------------------------
 browse() {
+  local sess
   refresh_cache
   while true; do
     resolve "${1:-}" || return 0
@@ -339,7 +384,8 @@ browse() {
     case "$REPLY_KEY" in
       ctrl-r) refresh_cache; continue ;;
       ctrl-o) open_code    "$REPLY_PATH" ;;
-      ctrl-h) open_herdr   "$REPLY_PATH" ;;   # exec, never returns
+      ctrl-h) open_herdr   "$REPLY_PATH" ;;   # attaches, then exits
+      ctrl-s) sess=$(pick_session) && open_herdr "$REPLY_PATH" "$sess" || true ;;
       ctrl-p) open_preview "$REPLY_PATH" "$REPLY_PORTS" || true ;;
       ctrl-e) cmd_env push -p "$REPLY_PATH" ;;
       *)      action_menu  "$REPLY_PATH" "$REPLY_PORTS" || continue ;;
@@ -563,6 +609,7 @@ cmd_ask() {
 
 # --- main ------------------------------------------------------------------
 main() {
+  local sess
   case "${1:-}" in
     _pane)     shift; cmd_pane "$@" ;;          # internal: fzf preview
     ls|list)   shift; cmd_ls "$@" ;;
@@ -572,7 +619,16 @@ main() {
     ask|\?)    shift; cmd_ask "$@" ;;
     rm|remove) shift; refresh_cache; resolve "${1:-}" && rm_worktree "$REPLY_PATH" ;;
     code)      shift; refresh_cache; resolve "${1:-}" && open_code "$REPLY_PATH" ;;
-    herdr|h)   shift; refresh_cache; resolve "${1:-}" && open_herdr "$REPLY_PATH" ;;
+    herdr|h)   shift
+               sess=""
+               case "${1:-}" in
+                 -s|--session) sess="${2:-}"; shift 2 ;;
+                 --session=*)  sess="${1#--session=}"; shift ;;
+                 --pick|-S)    shift; sess=$(pick_session) || exit 0 ;;
+               esac
+               refresh_cache; resolve "${1:-}" && open_herdr "$REPLY_PATH" "${sess:-$SESSION}" ;;
+    sessions|s) shift
+               sessions_list | awk -F'\t' 'NF{printf "  %-20s %-8s %s\n", $1, $2, $3}' ;;
     preview|p) shift; refresh_cache; resolve "${1:-}" && open_preview "$REPLY_PATH" "$REPLY_PORTS" ;;
     -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)         browse "${1:-}" ;;

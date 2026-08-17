@@ -17,6 +17,7 @@ dev                     browse worktrees with a live preview pane
                           → enter    open the action menu
                           ← esc      back out of the menu / quit
                           ctrl-o     VS Code      ctrl-h  herdr
+                          ctrl-s     herdr, in a chosen or new session
                           ctrl-p     preview      ctrl-e  env push
                           ctrl-r     refresh
 dev ls                  list every worktree, with any servers it is running
@@ -25,6 +26,9 @@ dev preview [query]     open a running server in the browser
 dev new [repo] <branch> [--base ref]
 dev code  [query]       open in VS Code, skipping the picker on a unique match
 dev herdr [query]       attach herdr, same matching
+dev herdr -S [query]    pick the session first
+dev herdr -s NAME       attach in a named session, created if it does not exist
+dev sessions            list herdr sessions on the box
 dev rm    [query]       remove a worktree checkout
 
 dev env push [query] [--from FILE]
@@ -44,6 +48,18 @@ the cache refreshes automatically after any action that could change state.
 
 Navigation loops rather than exits: backing out of the action menu with `←`
 returns to the list, and finishing a non-terminal action returns there too.
+
+## Sessions
+
+herdr nests as **session → workspace → tab → pane**. Tabs and workspaces are for
+multitasking inside one context, and `dev` already gives every worktree its own
+workspace. A second *session* is a different thing: an independent herdr with
+its own socket and its own workspaces, for work you want isolated or disposable.
+
+`ctrl-s` in the browser (or `dev herdr -S`) lists the sessions on the box and
+offers `+new`. Picking a name that does not exist yet creates it on attach —
+empty, since workspaces do not carry across. The worktree-open and focus calls
+are scoped to the chosen session too, because the socket API is per-session.
 
 `dev code foo` and `dev herdr foo` skip the picker entirely when `foo` matches
 exactly one worktree, so they compose well with shell history.
