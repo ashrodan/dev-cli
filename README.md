@@ -212,6 +212,14 @@ tool that reads a skills directory can use them.
   `.env` across. Covers the GitHub integration (so no token lands on the box),
   the audit that catches variables which don't survive the move — path-valued
   vars, localhost URLs, session-bound tokens — and the copy itself.
+- **omp-model-graph** — wire omp into a multi-model agent graph: roles pinned to
+  models, specialist agents as nodes, spawn rules as edges, typed handoffs, and
+  the config flags that are off by default. Includes which model to put where,
+  and how to spot a model that silently reroutes.
+- **hermes-herdr-blueprint** — rebuild a Hermes coding-agent host with Codex
+  subscription auth, local Browser Use automation and herdr integration.
+  Self-contained: `BLUEPRINT.md`, `scripts/install.sh`, `scripts/verify.sh` and
+  the systemd template travel with the skill.
 
 Link them into whichever tool you use:
 

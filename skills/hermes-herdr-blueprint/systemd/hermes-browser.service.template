@@ -1,0 +1,16 @@
+[Unit]
+Description=Headless Chromium for Hermes Browser Use
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__GROUP__
+Environment=HOME=__HOME__
+ExecStart=__CHROME_PATH__ --headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --user-data-dir=__HERMES_HOME__/browser-use-profile about:blank
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
