@@ -131,6 +131,30 @@ This is a convenience over a plaintext file, not a secret manager. See
 [docs/secrets.md](docs/secrets.md) for the real design discussion and why
 runtime injection is not the same thing as isolation.
 
+## Cloud credentials without keys
+
+`bin/exe-gcp-wif` does the GCP side of an exe.dev Workload Identity Federation
+integration: enables the APIs, creates the pool, the OIDC provider and the
+service account, and binds the exe.dev subject to impersonate it. Idempotent —
+existing pools, providers and accounts are left alone — and `--dry-run` prints
+what it would do.
+
+```sh
+exe-gcp-wif --project dash-ai-uat --sa dash-agent-uat \
+  --issuer https://exe.dev/issuer/<name> --subject sub-XXXX \
+  --audience <from the integration page> --bq-job-user
+```
+
+Run one per project, and take issuer/subject/audience from that integration's
+own page — they are not shared, and mixing them up fails like a permissions
+error. The credential config the VM ends up with holds no secret; it only says
+where to fetch a fresh short-lived token.
+
+Two grants are needed for BigQuery and they live in different places:
+`roles/bigquery.jobUser` on the project that bills the query, and
+`roles/bigquery.dataViewer` on each dataset that holds data. `metadataViewer`
+gives structure without rows, which is usually the right default for an agent.
+
 ## Fleet discovery
 
 Two helpers in `bin/`, for reaching the box and its siblings from other devices.

@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# exe-gcp-wif — GCP-side setup for an exe.dev Workload Identity Federation
+# integration, so attached VMs get short-lived credentials and no key file
+# ever lands on a box.
+#
+#   exe-gcp-wif --project choice-energy-au --sa dash-agent \
+#               --issuer https://exe.dev/issuer/<name> \
+#               --subject sub-XXXX --audience <from the exe.dev form>
+#
+#   --pool ID          workload identity pool (default: exe-dev)
+#   --provider ID      OIDC provider    (default: exe-dev)
+#   --bq-job-user      also grant roles/bigquery.jobUser on this project
+#   --cred-config PATH write the credential config file here
+#   --dry-run          print what would run, change nothing
+#
+# Run one per project. The issuer/subject/audience come from that integration's
+# own page — they are not shared between integrations, and pasting another
+# integration's values produces failures that look like permission errors.
+#
+# The credential config this writes contains NO secret: it only tells Google's
+# libraries where to fetch a fresh exe.dev token. It is safe to copy to a box;
+# the key you never created is the one that cannot leak.
+
+set -uo pipefail
+
+PROJECT="" SA_NAME="" ISSUER="" SUBJECT="" AUDIENCE=""
+POOL="exe-dev" PROVIDER="exe-dev" CRED_CONFIG="" BQ_JOB_USER=0 DRY=0
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --project)     PROJECT="$2"; shift 2 ;;
+    --sa)          SA_NAME="$2"; shift 2 ;;
+    --issuer)      ISSUER="$2"; shift 2 ;;
+    --subject)     SUBJECT="$2"; shift 2 ;;
+    --audience)    AUDIENCE="$2"; shift 2 ;;
+    --pool)        POOL="$2"; shift 2 ;;
+    --provider)    PROVIDER="$2"; shift 2 ;;
+    --cred-config) CRED_CONFIG="$2"; shift 2 ;;
+    --bq-job-user) BQ_JOB_USER=1; shift ;;
+    --dry-run)     DRY=1; shift ;;
+    -h|--help)     sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "exe-gcp-wif: unknown option $1" >&2; exit 1 ;;
+  esac
+done
+
+die() { echo "exe-gcp-wif: $*" >&2; exit 1; }
+[ -n "$PROJECT" ] || die "--project is required (see --help)"
+[ -n "$SA_NAME" ] || die "--sa is required (see --help)"
+[ -n "$ISSUER" ]  || die "--issuer is required (see --help)"
+[ -n "$SUBJECT" ] || die "--subject is required (see --help)"
+command -v gcloud >/dev/null || die "gcloud not found"
+
+run() {
+  if [ "$DRY" = 1 ]; then printf '  would run: %s\n' "$*"; return 0; fi
+  "$@"
+}
+
+NUMBER=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)' 2>/dev/null) \
+  || die "cannot read project $PROJECT — is gcloud authenticated? (gcloud auth login)"
+[ -n "$NUMBER" ] || die "no project number for $PROJECT"
+
+SA="${SA_NAME}@${PROJECT}.iam.gserviceaccount.com"
+POOL_RESOURCE="projects/${NUMBER}/locations/global/workloadIdentityPools/${POOL}"
+PROVIDER_RESOURCE="${POOL_RESOURCE}/providers/${PROVIDER}"
+# exe.dev previews the audience on the integration page; this is the standard
+# derivation and is only a fallback.
+[ -n "$AUDIENCE" ] || AUDIENCE="//iam.googleapis.com/${PROVIDER_RESOURCE}"
+
+cat <<SUMMARY
+project     $PROJECT ($NUMBER)
+service acct $SA
+pool        $POOL
+provider    $PROVIDER
+issuer      $ISSUER
+subject     $SUBJECT
+audience    $AUDIENCE
+SUMMARY
+[ "$DRY" = 1 ] && echo && echo "(dry run)"
+echo
+
+echo "== APIs =="
+run gcloud services enable iam.googleapis.com sts.googleapis.com \
+    iamcredentials.googleapis.com cloudresourcemanager.googleapis.com \
+    --project "$PROJECT"
+
+echo "== pool =="
+if gcloud iam workload-identity-pools describe "$POOL" --project "$PROJECT" \
+     --location global >/dev/null 2>&1; then
+  echo "  exists, leaving alone"
+else
+  run gcloud iam workload-identity-pools create "$POOL" --project "$PROJECT" \
+      --location global --display-name "exe.dev"
+fi
+
+echo "== provider =="
+if gcloud iam workload-identity-pools providers describe "$PROVIDER" \
+     --project "$PROJECT" --location global --workload-identity-pool "$POOL" \
+     >/dev/null 2>&1; then
+  echo "  exists — verify its issuer is $ISSUER"
+else
+  run gcloud iam workload-identity-pools providers create-oidc "$PROVIDER" \
+      --project "$PROJECT" --location global --workload-identity-pool "$POOL" \
+      --display-name "exe.dev" --issuer-uri "$ISSUER" \
+      --allowed-audiences "$AUDIENCE" \
+      --attribute-mapping "google.subject=assertion.sub"
+fi
+
+echo "== service account =="
+if gcloud iam service-accounts describe "$SA" --project "$PROJECT" >/dev/null 2>&1; then
+  echo "  exists, leaving alone"
+else
+  run gcloud iam service-accounts create "$SA_NAME" --project "$PROJECT" \
+      --display-name "exe.dev workload ($POOL)"
+fi
+
+echo "== trust: let the exe.dev subject impersonate the SA =="
+run gcloud iam service-accounts add-iam-policy-binding "$SA" --project "$PROJECT" \
+    --role roles/iam.workloadIdentityUser \
+    --member "principal://iam.googleapis.com/${POOL_RESOURCE}/subject/${SUBJECT}"
+
+if [ "$BQ_JOB_USER" = 1 ]; then
+  echo "== bigquery.jobUser on $PROJECT (run queries; grants no data access) =="
+  run gcloud projects add-iam-policy-binding "$PROJECT" \
+      --member "serviceAccount:$SA" --role roles/bigquery.jobUser --condition=None
+fi
+
+if [ -n "$CRED_CONFIG" ]; then
+  echo "== credential config -> $CRED_CONFIG =="
+  echo "  the exe.dev integration page prints the create-cred-config command"
+  echo "  including its token URL; run that, then copy the file to the box."
+fi
+
+cat <<NEXT
+
+Next:
+  ssh exe.dev "tag <vm> <the integration's tag>"
+  # data access is separate from job execution — grant per dataset:
+  bq add-iam-policy-binding -d --member="serviceAccount:$SA" \\
+     --role=roles/bigquery.dataViewer $PROJECT:<dataset>
+  # or structure only, no rows:
+  gcloud projects add-iam-policy-binding $PROJECT \\
+     --member="serviceAccount:$SA" --role=roles/bigquery.metadataViewer --condition=None
+NEXT
