@@ -55,6 +55,21 @@ run() {
   "$@"
 }
 
+# A service account created seconds ago is not yet visible to the project-level
+# IAM API, which rejects the binding with "does not exist". Retry rather than
+# leave the caller to notice a half-finished setup.
+run_retry() {
+  if [ "$DRY" = 1 ]; then printf '  would run: %s\n' "$*"; return 0; fi
+  local i
+  for i in 1 2 3 4 5; do
+    "$@" && return 0
+    echo "  not visible yet, retrying ($i/5)" >&2
+    sleep 6
+  done
+  echo "  FAILED after 5 attempts: $*" >&2
+  return 1
+}
+
 NUMBER=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)' 2>/dev/null) \
   || die "cannot read project $PROJECT — is gcloud authenticated? (gcloud auth login)"
 [ -n "$NUMBER" ] || die "no project number for $PROJECT"
@@ -120,7 +135,7 @@ run gcloud iam service-accounts add-iam-policy-binding "$SA" --project "$PROJECT
 
 if [ "$BQ_JOB_USER" = 1 ]; then
   echo "== bigquery.jobUser on $PROJECT (run queries; grants no data access) =="
-  run gcloud projects add-iam-policy-binding "$PROJECT" \
+  run_retry gcloud projects add-iam-policy-binding "$PROJECT" \
       --member "serviceAccount:$SA" --role roles/bigquery.jobUser --condition=None
 fi
 
