@@ -216,3 +216,43 @@ that are actively scraped. An obscure hostname is not a private one.
 
 **`~/.vscode-server` is a few hundred MB.** On a 25 GB disk with node_modules
 around, worth knowing it is there.
+
+## Workload Identity Federation — what actually bites
+
+Setting up GCP WIF for `dash-ai-uat` worked, but not on the first pass. In
+order of how much time each cost:
+
+**The subject in the integration form is not necessarily the one the VM
+presents.** Bind the wrong one and every symptom points at permissions. Read it
+from a live token instead:
+
+```sh
+ssh <vm> 'curl -sS https://<integration>.team.exe.xyz/token' |
+  python3 -c 'import base64,json,sys
+t=json.load(sys.stdin)["token"].split(".")[1]; t+="="*(-len(t)%4)
+c=json.loads(base64.urlsafe_b64decode(t))
+print("iss", c["iss"]); print("sub", c["sub"]); print("aud", c["aud"])'
+```
+
+**Team integrations attach to tags only.** `vm:<name>` is rejected. Attach to a
+tag the VM already carries rather than inventing one. Allow ~20s to propagate —
+until then `/token` returns "not found or not attached to this VM".
+
+**Two audience formats, both correct.** The JWT's `aud` is
+`https://iam.googleapis.com/projects/...` and the provider's `--allowed-audiences`
+must match it exactly. The credential config file uses `//iam.googleapis.com/...`
+— that one `gcloud create-cred-config` writes for you.
+
+**`gcloud` ignores `GOOGLE_APPLICATION_CREDENTIALS`.** That variable is for
+client libraries; the Go BigQuery client picks it up with no code change. The
+CLI needs `gcloud auth login --cred-file=<config>` plus
+`gcloud config set account <sa>` — `gcloud auth list` will show the account
+ACTIVE while `core/account` is still unset, which is not a helpful signal.
+
+**IAM propagates slowly, twice.** A service account seconds old is invisible to
+the project-level IAM API, and a fresh `workloadIdentityUser` binding takes
+another ~20-40s before impersonation succeeds. Retry rather than re-configure.
+
+Public datasets need no grant at all: `bigquery-public-data.thelook_ecommerce`
+carries `allUsers: READER`, so `roles/bigquery.jobUser` on the billing project
+is the entire permission set.
