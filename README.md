@@ -240,6 +240,10 @@ tool that reads a skills directory can use them.
   models, specialist agents as nodes, spawn rules as edges, typed handoffs, and
   the config flags that are off by default. Includes which model to put where,
   and how to spot a model that silently reroutes.
+- **gcp-wif-for-boxes** — give a VM short-lived GCP credentials via Workload
+  Identity Federation instead of a key file. Both halves of the trust chain,
+  how to read the real subject off a live token, and the failure table for the
+  errors that all present as "permission denied" whatever their actual cause.
 - **hermes-herdr-blueprint** — rebuild a Hermes coding-agent host with Codex
   subscription auth, local Browser Use automation and herdr integration.
   Self-contained: `BLUEPRINT.md`, `scripts/install.sh`, `scripts/verify.sh` and
