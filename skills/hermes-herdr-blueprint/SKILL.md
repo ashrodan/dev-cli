@@ -1,7 +1,7 @@
 ---
 name: hermes-herdr-blueprint
-description: Recreate Hermes with Browser Use and Herdr.
-version: 0.1.0
+description: Recreate Hermes with Browser Use, official messaging progress behaviour, and Herdr.
+version: 0.2.0
 author: Ashley Rodan, Hermes Agent
 license: MIT
 platforms: [linux]
@@ -13,13 +13,14 @@ metadata:
 
 # Hermes + Herdr Blueprint
 
-Recreate a Linux Hermes coding-agent host with OpenAI Codex subscription authentication, local Browser Use automation, skill/tool discovery, and Herdr lifecycle integration.
+Recreate a Linux Hermes coding-agent host with OpenAI Codex subscription authentication, local Browser Use automation, skill/tool discovery, official messaging progress behaviour, and Herdr lifecycle integration.
 
 ## When to Use
 
 - Rebuilding this coding-agent box on a new Linux VM.
 - Repairing Hermes browser or Herdr integration.
 - Auditing whether the expected components remain active.
+- Configuring or auditing Hermes typing, streaming, tool-progress, and long-running status behaviour on chat platforms.
 
 Do not use this skill to migrate credential files or expose the browser CDP endpoint publicly.
 
@@ -38,6 +39,18 @@ Do not use this skill to migrate credential files or expose the browser CDP endp
 4. Run `scripts/verify.sh` through the `terminal` tool.
 5. Do not declare success until every required verification passes.
 
+## Messaging Gateway Behaviour
+
+Treat the transport acknowledgement and the conversation as separate layers:
+
+- A webhook receiver SHOULD return 2xx quickly so the upstream transport does not retry. That HTTP response is invisible to the user.
+- Hermes starts the platform typing indicator immediately. It does **not** send a canned chat acknowledgement on every request.
+- Natural interim assistant commentary stays enabled independently of tool-progress verbosity.
+- The first long-running status appears after 180 seconds by default as `⏳ Working — N min`; later heartbeats update the same message where the adapter supports editing.
+- Native WhatsApp/Baileys supports edit-in-place progress. WhatsApp Cloud currently does not, so its quiet platform defaults suppress permanent progress chatter.
+
+Read `BLUEPRINT.md` before attaching a messaging transport. A wrapper that shells out to `hermes chat` receives only final CLI output and cannot claim parity with Hermes' structured gateway events.
+
 ## Herdr Rules
 
 The installer generates the authoritative local Herdr skill using `herdr --skill`. That generated skill governs pane and agent control and requires `HERDR_ENV=1`. Do not bypass that guard to control a user's focused Herdr session from outside Herdr.
@@ -49,6 +62,8 @@ The installer generates the authoritative local Herdr skill using `herdr --skill
 - Browser Use cloud authentication is optional; the blueprint uses local loopback CDP.
 - Never bind Chromium's remote-debugging port to `0.0.0.0`.
 - Never commit `~/.codex/auth.json`, `~/.hermes/auth.json`, or `~/.hermes/.env`.
+- Never confuse an upstream webhook's fast HTTP 200 with a user-visible acknowledgement.
+- Never add an immediate canned “I'm on it” reply to imitate typing. Preserve typing, interim commentary, and the three-minute Hermes heartbeat instead.
 
 ## Verification
 
@@ -58,4 +73,4 @@ Run:
 terminal(command="./scripts/verify.sh", timeout=180)
 ```
 
-Completion requires active Chromium, successful browser navigation, enabled tool search, Codex authentication, the local Herdr skill, and a current Herdr Hermes integration.
+Completion requires active Chromium, successful browser navigation, enabled tool search, Codex authentication, the local Herdr skill, and a current Herdr Hermes integration. When messaging is configured, also verify typing starts promptly, fast turns produce no canned acknowledgement, long-turn status starts only at the configured threshold, and the final answer is the last message.

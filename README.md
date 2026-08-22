@@ -245,9 +245,13 @@ tool that reads a skills directory can use them.
   how to read the real subject off a live token, and the failure table for the
   errors that all present as "permission denied" whatever their actual cause.
 - **hermes-herdr-blueprint** — rebuild a Hermes coding-agent host with Codex
-  subscription auth, local Browser Use automation and herdr integration.
-  Self-contained: `BLUEPRINT.md`, `scripts/install.sh`, `scripts/verify.sh` and
-  the systemd template travel with the skill.
+  subscription auth, local Browser Use automation, official messaging progress
+  behaviour and herdr integration. Self-contained: `BLUEPRINT.md`,
+  `scripts/install.sh`, `scripts/verify.sh` and the systemd template travel with
+  the skill.
+- **wagw-shim-config** — configure and diagnose the GOWA → wagw-shimmy → agent
+  WhatsApp path: directional tokens and peerings, group/channel policy, media,
+  typing, Hermes progress behaviour, durable queues, and safe verification.
 
 Link them into whichever tool you use:
 
