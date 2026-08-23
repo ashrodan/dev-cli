@@ -12,6 +12,8 @@ happens to hold the primary branch.
 ## Usage
 
 ```
+dev -H HOST [command]   use another SSH config alias and its configured key
+dev -H PROFILE -B BOX  select an exe.dev box through an account/lobby alias
 dev                     browse worktrees with a live preview pane
                           ↑ ↓        move, preview updates as you go
                           → enter    open the action menu
@@ -200,25 +202,44 @@ a live subscription — re-import when the fleet changes.
 Local: `bash`, `fzf`, `python3`, `ssh`, and the `code` CLI for the VS Code path.
 Remote: `herdr` on `PATH`, `git`, `python3`.
 
-An SSH host alias for the box — the default is `dai`:
+An SSH host alias for the box — the default is `dai`. Put each box's key on its
+own alias; `dev -H work-box` uses the same `HostName`, `User`, `IdentityFile`,
+and other SSH config that `ssh work-box` uses:
 
 ```sshconfig
 Host dai
   HostName your-box.example.com
   User you
+  IdentityFile ~/.ssh/id_ed25519
+
+Host work-box
+  HostName another-box.example.com
+  User you
+  IdentityFile ~/.ssh/work-box
+  IdentitiesOnly yes
 ```
+
+An exe.dev lobby alias such as `exe-dash` can also be passed directly. `dev`
+lists that account's running boxes and keeps the alias's identity while
+connecting. A single box is selected automatically; select among several with
+`dev -H exe-dash -B box-name`.
+
+VS Code Remote-SSH cannot inherit a one-off `HostName` override. For `dev code`
+through a lobby profile, give the box name its own SSH config alias with the
+same key (for example `Host box-name`); `dev` uses that alias when available.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DEV_REMOTE` | `dai` | SSH host alias for the box |
+| `DEV_REMOTE` | `dai` | SSH host or exe.dev lobby alias |
+| `DEV_BOX` | unset | Box name when `DEV_REMOTE` is an exe.dev lobby alias |
 | `DEV_REMOTE_HOME` | `/home/exedev` | Remote home, where repos are searched |
 | `DEV_WT_ROOT` | `$DEV_REMOTE_HOME/worktrees` | Where new worktrees are created |
 | `DEV_SESSION` | `default` | herdr session to attach |
-| `DEV_PROXY_HOST` | `herdr-1.exe.xyz` | hostname the exe.dev proxy serves |
+| `DEV_PROXY_HOST` | resolved SSH hostname | hostname the exe.dev proxy serves |
 | `DEV_PROXY_PORT` | `8000` | the designated port, served at the bare hostname |
-| `DEV_TS_HOST` | `herdr-1` | Tailscale/MagicDNS name, used for ports outside 3000-9999 |
+| `DEV_TS_HOST` | resolved hostname without `.exe.xyz` | Tailscale/MagicDNS name, used for ports outside 3000-9999 |
 
 ## Install
 

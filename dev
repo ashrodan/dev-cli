@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # dev — worktree-first navigator for the herdr dev box.
 #
+#   dev [-H host] [-B box] [command...]
+#                    use an SSH host alias; select a box for lobby aliases
 #   dev              browse worktrees
 #                      ↑ ↓     move, preview updates live
 #                      → enter open the action menu
@@ -28,23 +30,98 @@
 set -uo pipefail
 
 REMOTE="${DEV_REMOTE:-dai}"
+BOX="${DEV_BOX:-}"
+SSH_OVERRIDE_HOST="${DEV_SSH_HOSTNAME:-}"
 RHOME="${DEV_REMOTE_HOME:-/home/exedev}"
 HERDR="$RHOME/.local/bin/herdr"
 WT_ROOT="${DEV_WT_ROOT:-$RHOME/worktrees}"
 SESSION="${DEV_SESSION:-default}"
-PROXY_HOST="${DEV_PROXY_HOST:-herdr-1.exe.xyz}"
-TS_HOST="${DEV_TS_HOST:-herdr-1}"
+PROXY_HOST="${DEV_PROXY_HOST:-}"
+TS_HOST="${DEV_TS_HOST:-}"
 PROXY_PORT="${DEV_PROXY_PORT:-8000}"
 
 die()  { printf 'dev: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+
+configure_remote() {
+  local resolved choices choice count
+  resolved=$(ssh -G "$REMOTE" 2>/dev/null |
+             awk '$1 == "hostname" { print $2; exit }')
+  [ -n "$resolved" ] || resolved="$REMOTE"
+
+  # An exe.dev account alias (for example `exe-dash`) reaches the lobby rather
+  # than a VM. Resolve it to a shell-capable running box while retaining the
+  # alias as the SSH destination, so its IdentityFile still selects the account.
+  if [ -z "$SSH_OVERRIDE_HOST" ] && [ "$resolved" = "exe.dev" ]; then
+    choices=$(ssh "$REMOTE" ls --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    vms = json.load(sys.stdin).get("vms", [])
+except Exception:
+    sys.exit(1)
+for vm in vms:
+    if vm.get("status") == "running" and vm.get("access", {}).get("shell"):
+        name = vm.get("vm_name", "")
+        host = vm.get("ssh_host") or vm.get("ssh_dest") or ""
+        if name and host:
+            print(name + "\t" + host)
+') || die "could not list boxes through SSH profile $REMOTE"
+    [ -n "$choices" ] || die "SSH profile $REMOTE has no running shell-capable boxes"
+
+    if [ -n "$BOX" ]; then
+      choice=$(printf '%s\n' "$choices" |
+               awk -F'\t' -v box="$BOX" '$1 == box || $2 == box { print; exit }')
+      [ -n "$choice" ] || die "box $BOX is not a running box in SSH profile $REMOTE"
+    else
+      count=$(printf '%s\n' "$choices" | awk 'NF { n++ } END { print n + 0 }')
+      if [ "$count" -eq 1 ]; then
+        choice="$choices"
+      else
+        [ -t 0 ] || die "SSH profile $REMOTE has multiple boxes; select one with --box NAME"
+        need fzf
+        choice=$(printf '%s\n' "$choices" |
+                 fzf --prompt='box> ' --reverse --height=30% --delimiter=$'\t' --with-nth=1) ||
+          exit 0
+      fi
+    fi
+    BOX=$(printf '%s' "$choice" | cut -f1)
+    SSH_OVERRIDE_HOST=$(printf '%s' "$choice" | cut -f2)
+    resolved="$SSH_OVERRIDE_HOST"
+  fi
+
+  [ -n "$PROXY_HOST" ] || PROXY_HOST="$resolved"
+  if [ -z "$TS_HOST" ]; then
+    case "$resolved" in
+      *.exe.xyz) TS_HOST="${resolved%.exe.xyz}" ;;
+      *)         TS_HOST="$resolved" ;;
+    esac
+  fi
+
+  # fzf starts the preview as a fresh dev process. Preserve the selected host
+  # and its derived URL settings instead of repeating profile discovery.
+  export DEV_REMOTE="$REMOTE" DEV_BOX="$BOX" DEV_SSH_HOSTNAME="$SSH_OVERRIDE_HOST"
+  export DEV_PROXY_HOST="$PROXY_HOST" DEV_TS_HOST="$TS_HOST"
+}
+
+ssh_remote() {
+  local -a tty=()
+  if [ "${1:-}" = "-t" ]; then
+    tty=(-t)
+    shift
+  fi
+  if [ -n "$SSH_OVERRIDE_HOST" ]; then
+    ssh "${tty[@]}" -o "HostName=$SSH_OVERRIDE_HOST" "$REMOTE" "$@"
+  else
+    ssh "${tty[@]}" "$REMOTE" "$@"
+  fi
+}
 
 # --- remote scan -----------------------------------------------------------
 # One SSH round trip. Tab separated:
 #   1 repo  2 branch  3 path  4 workspace  5 kind  6 ports
 #   7 sha   8 when    9 dirty 10 ahead    11 behind  12 subject
 scan() {
-  ssh "$REMOTE" "RHOME='$RHOME' HERDR='$HERDR' bash -s" <<'REMOTE_EOF'
+  ssh_remote "RHOME='$RHOME' HERDR='$HERDR' bash -s" <<'REMOTE_EOF'
 set -uo pipefail
 export PATH="$RHOME/.local/bin:$PATH"
 
@@ -190,7 +267,18 @@ cmd_pane() {
 # --- actions ---------------------------------------------------------------
 open_code() {
   need code
-  code --remote "ssh-remote+$REMOTE" "$1" && printf 'dev: opened %s in VS Code\n' "$1"
+  local code_remote="$REMOTE" candidate
+  if [ -n "$SSH_OVERRIDE_HOST" ]; then
+    candidate=$(ssh -G "$BOX" 2>/dev/null |
+                awk '$1 == "hostname" { print $2; exit }')
+    if [ "$candidate" = "$SSH_OVERRIDE_HOST" ]; then
+      code_remote="$BOX"
+    else
+      code_remote="$SSH_OVERRIDE_HOST"
+    fi
+  fi
+  code --remote "ssh-remote+$code_remote" "$1" &&
+    printf 'dev: opened %s in VS Code\n' "$1"
 }
 
 # --- herdr sessions --------------------------------------------------------
@@ -198,7 +286,7 @@ open_code() {
 # Tabs and workspaces are for multitasking inside one context; a second session
 # is for work you want isolated — a spike, a demo, something disposable.
 sessions_list() {
-  ssh "$REMOTE" "$HERDR session list --json 2>/dev/null" |
+  ssh_remote "$HERDR session list --json 2>/dev/null" |
   python3 -c 'import json,sys
 try: d = json.load(sys.stdin)
 except Exception: sys.exit(0)
@@ -243,7 +331,7 @@ term_restore() {
 # Run an interactive remote command and exit, restoring the terminal either way.
 # Replaces a bare `exec ssh`, which leaves no opportunity to clean up.
 remote_tty() {
-  ssh -t "$REMOTE" "$1"
+  ssh_remote -t "$1"
   local rc=$?
   term_restore
   exit $rc
@@ -254,11 +342,11 @@ open_herdr() {
   # Socket-API calls are per-session, so they must be scoped the same way the
   # attach is. A session that does not exist yet simply returns nothing here —
   # we attach anyway and it gets created empty.
-  ws=$(ssh "$REMOTE" "$HERDR --session $session worktree open --path '$path' 2>/dev/null" |
+  ws=$(ssh_remote "$HERDR --session $session worktree open --path '$path' 2>/dev/null" |
        python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("result",{}).get("workspace_id","") or "")
 except Exception: print("")' 2>/dev/null)
-  [ -n "$ws" ] && ssh "$REMOTE" "$HERDR --session $session workspace focus $ws" >/dev/null 2>&1
+  [ -n "$ws" ] && ssh_remote "$HERDR --session $session workspace focus $ws" >/dev/null 2>&1
   remote_tty "$HERDR --session $session"
 }
 
@@ -445,7 +533,7 @@ cmd_new() {
   local args="--cwd '$repo' --branch '$branch' --path '$path' --focus"
   [ -n "$base" ] && args="$args --base '$base'"
 
-  ssh "$REMOTE" "mkdir -p '$(dirname "$path")' && $HERDR worktree create $args" >/dev/null \
+  ssh_remote "mkdir -p '$(dirname "$path")' && $HERDR worktree create $args" >/dev/null \
     || die "worktree create failed"
   printf 'dev: created %s on %s\n' "$path" "$branch"
 }
@@ -456,7 +544,7 @@ rm_worktree() {
   printf 'Remove worktree %s? [y/N] ' "$path"
   read -r ans; [ "$ans" = y ] || [ "$ans" = Y ] || { echo "aborted"; return 1; }
   [ -z "$ws" ] && die "not open as a workspace; open it first (dev herdr)"
-  ssh "$REMOTE" "$HERDR worktree remove --workspace '$ws'" >/dev/null && echo "dev: removed $path"
+  ssh_remote "$HERDR worktree remove --workspace '$ws'" >/dev/null && echo "dev: removed $path"
 }
 
 # --- env -------------------------------------------------------------------
@@ -532,7 +620,7 @@ cmd_env() {
 
   case "$sub" in
     ls)
-      ssh "$REMOTE" "sed -n 's/^\s*\([A-Za-z_][A-Za-z0-9_]*\)\s*=.*/\1/p' '$target/.env' 2>/dev/null" |
+      ssh_remote "sed -n 's/^\s*\([A-Za-z_][A-Za-z0-9_]*\)\s*=.*/\1/p' '$target/.env' 2>/dev/null" |
         sed 's/^/  /'
       ;;
     diff)
@@ -540,7 +628,7 @@ cmd_env() {
       [ -f "$from" ] || die "no local source: $from"
       local here there
       here=$(env_keys_local "$from" | cut -f1 | sort)
-      there=$(ssh "$REMOTE" "sed -n 's/^\s*\([A-Za-z_][A-Za-z0-9_]*\)\s*=.*/\1/p' '$target/.env' 2>/dev/null" | sort)
+      there=$(ssh_remote "sed -n 's/^\s*\([A-Za-z_][A-Za-z0-9_]*\)\s*=.*/\1/p' '$target/.env' 2>/dev/null" | sort)
       echo "local only  ($from):";        comm -23 <(echo "$here") <(echo "$there") | sed 's/^/  + /'
       echo "remote only ($target/.env):"; comm -13 <(echo "$here") <(echo "$there") | sed 's/^/  - /'
       ;;
@@ -564,7 +652,7 @@ cmd_env() {
       printf 'Copy %d var(s) to %s:%s/.env? [y/N] ' "$n" "$REMOTE" "$target"
       read -r ans; [ "$ans" = y ] || [ "$ans" = Y ] || { echo "aborted"; return 1; }
 
-      ssh "$REMOTE" "TARGET='$target/.env' python3 -c \"\$(printf %s '$(printf '%s' "$ENV_MERGE_PY" | base64)' | base64 -d)\"" \
+      ssh_remote "TARGET='$target/.env' python3 -c \"\$(printf %s '$(printf '%s' "$ENV_MERGE_PY" | base64)' | base64 -d)\"" \
         < <(while IFS= read -r k; do
               [ -z "$k" ] && continue
               grep -m1 -E "^[[:space:]]*$k[[:space:]]*=" "$from" | sed 's/^[[:space:]]*//'
@@ -604,12 +692,52 @@ cmd_ask() {
     remote_tty "cd '$path' && export PATH=\$HOME/.local/bin:\$PATH && exec $agent"
   fi
   printf '%s' "$question" |
-    ssh "$REMOTE" "cd '$path' && export PATH=\$HOME/.local/bin:\$PATH && P=\$(cat) && $one"
+    ssh_remote "cd '$path' && export PATH=\$HOME/.local/bin:\$PATH && P=\$(cat) && $one"
 }
 
 # --- main ------------------------------------------------------------------
 main() {
   local sess
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -H|--host|-r|--remote)
+        [ $# -ge 2 ] || die "missing SSH host after $1"
+        REMOTE="$2"
+        shift 2
+        ;;
+      --host=*|--remote=*)
+        REMOTE="${1#*=}"
+        [ -n "$REMOTE" ] || die "SSH host cannot be empty"
+        shift
+        ;;
+      -B|--box)
+        [ $# -ge 2 ] || die "missing box name after $1"
+        BOX="$2"
+        shift 2
+        ;;
+      --box=*)
+        BOX="${1#*=}"
+        [ -n "$BOX" ] || die "box name cannot be empty"
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  case "${1:-}" in
+    -h|--help)
+      sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+      return
+      ;;
+  esac
+
+  configure_remote
+
   case "${1:-}" in
     _pane)     shift; cmd_pane "$@" ;;          # internal: fzf preview
     ls|list)   shift; cmd_ls "$@" ;;
@@ -630,7 +758,6 @@ main() {
     sessions|s) shift
                sessions_list | awk -F'\t' 'NF{printf "  %-20s %-8s %s\n", $1, $2, $3}' ;;
     preview|p) shift; refresh_cache; resolve "${1:-}" && open_preview "$REPLY_PATH" "$REPLY_PORTS" ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)         browse "${1:-}" ;;
   esac
 }
