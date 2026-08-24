@@ -71,6 +71,10 @@ case "$*" in
     printf '/home/exedev/sample\n'
     ;;
   *"worktree list --porcelain"*)
+    if [ -n "${DEV_TEST_EXISTING_WORKTREE:-}" ]; then
+      printf 'worktree /home/exedev/worktrees/sample/existing\n'
+      printf 'branch refs/heads/work/%s-fix-login\n\n' "$(date +%Y%m%d)"
+    fi
     ;;
   *"symbolic-ref --short refs/remotes/origin/HEAD"*)
     printf 'origin/main\n'
@@ -167,11 +171,19 @@ assert_contains() {
   esac
 }
 
+assert_not_contains() {
+  case "$1" in
+    *"$2"*) fail "did not expect [$2] in [$1]" ;;
+    *) ;;
+  esac
+}
+
 run_dev() {
   PATH="$TMP/bin:$PATH" DEV_TEST_LOG="$LOG" DEV_TEST_MULTI="${DEV_TEST_MULTI:-}" \
     DEV_TEST_PICK="${DEV_TEST_PICK:-}" DEV_TEST_PROJECT="${DEV_TEST_PROJECT:-}" \
     DEV_TEST_REPO_MISSING="${DEV_TEST_REPO_MISSING:-}" DEV_TEST_CLONE_FAIL="${DEV_TEST_CLONE_FAIL:-}" \
     DEV_TEST_INTEGRATION_EXISTS="${DEV_TEST_INTEGRATION_EXISTS:-}" \
+    DEV_TEST_EXISTING_WORKTREE="${DEV_TEST_EXISTING_WORKTREE:-}" \
     DEV_TEST_CLIPBOARD="$CLIPBOARD" DEV_TEST_FZF_STATE="$FZF_STATE" \
     DEV_SSH_CONFIG="$TMP/ssh/config" DEV_PROJECT_ROOT="$TMP/projects" "$ROOT/dev" "$@"
 }
@@ -272,6 +284,14 @@ assert_contains "$task_run_output" "preparing prompt-fix-login"
 assert_contains "$task_run_calls" "worktree create --cwd /home/exedev/sample"
 assert_contains "$task_run_calls" "agent start prompt-fix-login --kind omp"
 assert_contains "$task_run_calls" "ssh -t -o HostName=ar-general-dev.exe.xyz exe-dash"
+
+: > "$LOG"
+reuse_output=$(DEV_TEST_EXISTING_WORKTREE=1 \
+  run_dev -H exe-dash task run dashlytix/sample prompt "Fix login")
+reuse_calls=$(<"$LOG")
+assert_contains "$reuse_output" "preparing prompt-fix-login"
+assert_contains "$reuse_calls" "worktree open --path /home/exedev/worktrees/sample/existing"
+assert_not_contains "$reuse_calls" "worktree create"
 
 : > "$LOG"
 missing_run_output=$(DEV_TEST_REPO_MISSING=1 run_dev -H exe-dash task run dashlytix/sample prompt "Fix login")
