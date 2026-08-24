@@ -75,12 +75,22 @@ case "$*" in
 esac
 
 case "$*" in
+  *"rev-parse --path-format=absolute --git-common-dir"*)
+    printf '/home/exedev/workspace/sample/.git\n'
+    exit 0
+    ;;
+esac
+
+case "$*" in
   *"git clone "*)
     [ -z "${DEV_TEST_CLONE_FAIL:-}" ] || exit 3
     printf '/home/exedev/sample\n'
     ;;
   *"worktree list --porcelain"*)
-    if [ -n "${DEV_TEST_EXISTING_WORKTREE:-}" ]; then
+    if [ -n "${DEV_TEST_CROSS_REPO_WORKTREE:-}" ]; then
+      printf 'worktree /home/exedev/worktrees/sample/cross-existing\n'
+      printf 'branch refs/heads/feat/pr-125\n\n'
+    elif [ -n "${DEV_TEST_EXISTING_WORKTREE:-}" ]; then
       printf 'worktree /home/exedev/worktrees/sample/existing\n'
       printf 'branch refs/heads/work/%s-fix-login\n\n' "$(date +%Y%m%d)"
     fi
@@ -101,6 +111,9 @@ case "$*" in
     if [ -z "${DEV_TEST_REPO_MISSING:-}" ]; then
       if [ -n "${DEV_TEST_DUPLICATE_REPO:-}" ]; then
         printf 'sample\tmain\t/home/exedev/workspace/sample\t\tmain\t\tdef456\tnow\t0\t0\t0\tmessage\n'
+      fi
+      if [ -n "${DEV_TEST_CROSS_REPO_WORKTREE:-}" ]; then
+        printf 'sample\tfeat/pr-125\t/home/exedev/worktrees/sample/cross-existing\tw-task\tlinked\t\tdef456\tnow\t0\t0\t0\tmessage\n'
       fi
       printf 'sample\tmain\t/home/exedev/sample\t\tmain\t3000\tabc123\tnow\t0\t0\t0\tmessage\n'
     fi
@@ -210,6 +223,7 @@ run_dev() {
     DEV_TEST_REPO_MISSING="${DEV_TEST_REPO_MISSING:-}" DEV_TEST_CLONE_FAIL="${DEV_TEST_CLONE_FAIL:-}" \
     DEV_TEST_INTEGRATION_EXISTS="${DEV_TEST_INTEGRATION_EXISTS:-}" \
     DEV_TEST_DUPLICATE_REPO="${DEV_TEST_DUPLICATE_REPO:-}" \
+    DEV_TEST_CROSS_REPO_WORKTREE="${DEV_TEST_CROSS_REPO_WORKTREE:-}" \
     DEV_TEST_EXISTING_WORKTREE="${DEV_TEST_EXISTING_WORKTREE:-}" \
     DEV_TEST_CLIPBOARD="$CLIPBOARD" DEV_TEST_FZF_STATE="$FZF_STATE" \
     DEV_SSH_CONFIG="$TMP/ssh/config" DEV_PROJECT_ROOT="$TMP/projects" "$ROOT/dev" "$@"
@@ -322,6 +336,16 @@ assert_contains "$pr_run_calls" "fetch origin pull/125/head:refs/heads/feat/pr-1
 assert_contains "$pr_run_calls" "worktree open --workspace w-main"
 assert_contains "$pr_run_calls" "git -C /home/exedev/sample show-ref"
 assert_not_contains "$pr_run_calls" "git -C /home/exedev/workspace/sample"
+
+: > "$LOG"
+cross_reuse_output=$(DEV_TEST_CROSS_REPO_WORKTREE=1 \
+  run_dev -H exe-dash task run dashlytix/sample pr 125)
+cross_reuse_calls=$(<"$LOG")
+assert_contains "$cross_reuse_output" "preparing pr-125"
+assert_contains "$cross_reuse_calls" "git -C /home/exedev/worktrees/sample/cross-existing rev-parse"
+assert_contains "$cross_reuse_calls" "git -C /home/exedev/workspace/sample worktree list --porcelain"
+assert_contains "$cross_reuse_calls" "worktree open --workspace w-main --path /home/exedev/worktrees/sample/cross-existing"
+assert_not_contains "$cross_reuse_calls" "worktree create"
 assert_contains "$pr_run_calls" "agent start pr-125 --kind omp"
 
 : > "$LOG"

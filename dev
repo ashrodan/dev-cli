@@ -722,9 +722,23 @@ task_wizard() {
 }
 
 ensure_remote_repo() {
-  local project="$1" repo_name data path dest url qdest qurl vm integration
+  local project="$1" repo_name data path task_path qtask common dest url qdest qurl vm integration
   repo_name="${project##*/}"
   data=$(scan 2>/dev/null || true)
+  task_path=$(printf '%s\n' "$data" |
+              awk -F'\t' -v repo="$repo_name" -v branch="$TASK_BRANCH" '
+                $1 == repo && $2 == branch && $5 == "linked" { print $3; exit }
+              ')
+  if [ -n "$task_path" ]; then
+    printf -v qtask '%q' "$task_path"
+    common=$(ssh_remote "git -C $qtask rev-parse --path-format=absolute --git-common-dir 2>/dev/null" || true)
+    case "$common" in
+      */.git)
+        printf '%s\n' "${common%/.git}"
+        return 0
+        ;;
+    esac
+  fi
   path=$(printf '%s\n' "$data" |
          awk -F'\t' -v repo="$repo_name" -v preferred="$RHOME/$repo_name" '
            $1 == repo && $5 == "main" {

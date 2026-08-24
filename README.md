@@ -92,9 +92,11 @@ Paste that command into a new terminal. It:
 
 PRs use their head branch and fetch `pull/<number>/head` when needed. A Linear
 issue reuses the branch from a linked PR in the selected project, falling back
-to Linear's suggested branch name. Free-form prompts use a dated `work/<slug>`
-branch. If the GitHub integration is missing, `dev` stops without changing
-account configuration and prints the exact attach or add command.
+to Linear's suggested branch name. If duplicate repository checkouts exist,
+`dev` first follows an existing task worktree back to its actual parent;
+otherwise it prefers `$DEV_REMOTE_HOME/REPO`. Free-form prompts use a dated
+`work/<slug>` branch. If the GitHub integration is missing, `dev` stops without
+changing account configuration and prints the exact attach or add command.
 
 The standalone entry point is `dev -P task`. Scripts can bypass the wizard with
 `dev task plan OWNER/REPO pr|linear|prompt REF`.
