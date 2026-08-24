@@ -18,8 +18,9 @@ dev -H HOST [command]   use another SSH config alias and its configured key
 dev -H PROFILE -B BOX  select an exe.dev box through an account/lobby alias
 dev                     browse worktrees with a live preview pane
                           ↑ ↓        move, preview updates as you go
-                          → enter    open the action menu
-                          ← esc      back out of the menu / quit
+                          enter      copy herdr login command
+                          →          open the action menu
+                          ← esc      quit
                           ctrl-o     VS Code      ctrl-h  herdr
                           ctrl-s     herdr, in a chosen or new session
                           ctrl-p     preview      ctrl-e  env push
@@ -30,6 +31,7 @@ dev preview [query]     open a running server in the browser
 dev new [repo] <branch> [--base ref]
 dev code  [query]       open in VS Code, skipping the picker on a unique match
 dev herdr [query]       attach herdr, same matching
+dev copy [query]        copy login command without attaching
 dev herdr -S [query]    pick the session first
 dev herdr -s NAME       attach in a named session, created if it does not exist
 dev sessions            list herdr sessions on the box
@@ -41,8 +43,18 @@ dev env ls   [query]    key names present on the remote worktree
 dev env diff [query]    which keys are local-only vs remote-only
 ```
 
-A `●` marks a worktree with an open herdr workspace, `*n` uncommitted files, and
-`▶ port` a server it is running.
+A `●` marks a worktree with an open herdr workspace, `*n` uncommitted files,
+and `▶ port` a server it is running. Select a worktree and press `enter` to copy
+a complete command such as:
+
+```sh
+dev -H exe-dash -B ar-general-dev herdr -s default /home/exedev/dash-ai-agent
+```
+
+The command pins the SSH profile, box, herdr session, and full worktree path.
+Open another terminal, paste it, and `dev` focuses that workspace before
+attaching herdr. Use `→` for the action menu instead, or `dev copy [query]` to
+copy directly without opening the browser.
 
 The preview pane shows branch, HEAD, relative age and subject, working-tree
 state, ahead/behind against upstream, the herdr workspace, and any URLs the
@@ -50,8 +62,9 @@ worktree is serving. It renders from the cached scan rather than hitting the box
 per keystroke, so arrowing through the list is instant. `ctrl-r` re-scans, and
 the cache refreshes automatically after any action that could change state.
 
-Navigation loops rather than exits: backing out of the action menu with `←`
-returns to the list, and finishing a non-terminal action returns there too.
+Pressing `enter` copies the command and exits. The action menu still loops:
+backing out with `←` returns to the workspace list, and finishing a non-terminal
+action returns there too.
 
 ## Sessions
 

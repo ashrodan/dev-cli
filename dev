@@ -5,8 +5,8 @@
 #   dev [-H host] [-B box] [command...] use a host; select a box for profiles
 #   dev              browse worktrees
 #                      ↑ ↓     move, preview updates live
-#                      → enter open the action menu
-#                      ←  esc  back out / quit
+#                      enter copy herdr login command
+#                      →     open the action menu     ← / esc quit
 #                      ctrl-o  VS Code     ctrl-h  herdr
 #                      ctrl-s  herdr, in a chosen or new session
 #                      ctrl-p  preview     ctrl-e  env push
@@ -17,6 +17,7 @@
 #   dev rm   [query]
 #   dev code [query]                 open in VS Code
 #   dev herdr [query]                attach the herdr session there
+#   dev copy [query]                copy the herdr login command
 #   dev herdr -S [query]             ...picking the session first
 #   dev herdr -s NAME [query]        ...in a named session (created if new)
 #   dev sessions                     list herdr sessions on the box
@@ -358,6 +359,35 @@ open_code() {
     printf 'dev: opened %s in VS Code\n' "$1"
 }
 
+clipboard_write() {
+  if command -v pbcopy >/dev/null 2>&1; then
+    pbcopy
+  elif command -v wl-copy >/dev/null 2>&1; then
+    wl-copy
+  elif command -v xclip >/dev/null 2>&1; then
+    xclip -selection clipboard
+  else
+    die "no clipboard command found (pbcopy, wl-copy, or xclip)"
+  fi
+}
+
+herdr_login_command() {
+  local path="$1" session="${2:-$SESSION}" command
+  printf -v command 'dev -H %q' "$REMOTE"
+  if [ -n "$BOX" ]; then
+    printf -v command '%s -B %q' "$command" "$BOX"
+  fi
+  printf -v command '%s herdr -s %q %q' "$command" "$session" "$path"
+  printf '%s\n' "$command"
+}
+
+copy_herdr_command() {
+  local command
+  command=$(herdr_login_command "$1" "${2:-$SESSION}")
+  printf '%s' "$command" | clipboard_write
+  printf 'dev: copied %s\n' "$command"
+}
+
 # --- herdr sessions --------------------------------------------------------
 # A session is a whole independent herdr: its own socket, its own workspaces.
 # Tabs and workspaces are for multitasking inside one context; a second session
@@ -462,6 +492,7 @@ action_menu() {
   local path="$1" ports="$2" srv="none" out key choice
   [ -n "$ports" ] && srv="$ports"
   out=$(printf '%s\n' \
+    "copy     copy herdr login command" \
     "herdr    attach the herdr session here" \
     "session  attach here in another herdr session" \
     "code     open in VS Code (Remote-SSH)" \
@@ -478,6 +509,7 @@ action_menu() {
   [ -z "$choice" ] && return 1
 
   case "${choice%% *}" in
+    copy)    copy_herdr_command "$path" ;;
     herdr)   open_herdr "$path" ;;
     session) local sess; sess=$(pick_session) || return 0; open_herdr "$path" "$sess" ;;
     code)    open_code "$path" ;;
@@ -517,8 +549,8 @@ pick() {
   fi
 
   out=$(fmt < "$CACHE" |
-        fzf --ansi --reverse --height=100% --prompt='worktree> ' --query="${1:-}" \
-            --header='↑↓ move   →/enter menu   ctrl-o code   ctrl-h herdr   ctrl-s session   ctrl-p preview   ctrl-e env   ctrl-r refresh' \
+        fzf --ansi --reverse --height=100% --prompt='workspace> ' --query="${1:-}" \
+            --header='↑↓ move   enter copy login   → menu   ctrl-o code   ctrl-h herdr   ctrl-s session   ctrl-p preview   ctrl-e env   ctrl-r refresh' \
             --preview="$0 _pane {-1}" --preview-window='right,52%,border-left,wrap' \
             --expect=right,ctrl-o,ctrl-h,ctrl-s,ctrl-p,ctrl-e,ctrl-r) || return 1
 
@@ -547,13 +579,14 @@ browse() {
     resolve "${1:-}" || return 0
     set --                                   # query applies to the first pass only
     case "$REPLY_KEY" in
-      ctrl-r) refresh_cache; continue ;;
-      ctrl-o) open_code    "$REPLY_PATH" ;;
-      ctrl-h) open_herdr   "$REPLY_PATH" ;;   # attaches, then exits
-      ctrl-s) sess=$(pick_session) && open_herdr "$REPLY_PATH" "$sess" || true ;;
-      ctrl-p) open_preview "$REPLY_PATH" "$REPLY_PORTS" || true ;;
-      ctrl-e) cmd_env push -p "$REPLY_PATH" ;;
-      *)      action_menu  "$REPLY_PATH" "$REPLY_PORTS" || continue ;;
+      "")      copy_herdr_command "$REPLY_PATH"; return 0 ;;
+      right)   action_menu "$REPLY_PATH" "$REPLY_PORTS" || continue ;;
+      ctrl-r)  refresh_cache; continue ;;
+      ctrl-o)  open_code    "$REPLY_PATH" ;;
+      ctrl-h)  open_herdr   "$REPLY_PATH" ;;   # attaches, then exits
+      ctrl-s)  sess=$(pick_session) && open_herdr "$REPLY_PATH" "$sess" || true ;;
+      ctrl-p)  open_preview "$REPLY_PATH" "$REPLY_PORTS" || true ;;
+      ctrl-e)  cmd_env push -p "$REPLY_PATH" ;;
     esac
     refresh_cache                            # state may have changed
   done
@@ -832,6 +865,7 @@ main() {
     ask|\?)    shift; cmd_ask "$@" ;;
     rm|remove) shift; refresh_cache; resolve "${1:-}" && rm_worktree "$REPLY_PATH" ;;
     code)      shift; refresh_cache; resolve "${1:-}" && open_code "$REPLY_PATH" ;;
+    copy|cp)  shift; refresh_cache; resolve "${1:-}" && copy_herdr_command "$REPLY_PATH" ;;
     herdr|h)   shift
                sess=""
                case "${1:-}" in

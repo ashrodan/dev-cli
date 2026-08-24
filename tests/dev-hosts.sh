@@ -5,6 +5,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/dev-hosts-test.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 LOG="$TMP/calls"
+CLIPBOARD="$TMP/clipboard"
 mkdir -p "$TMP/bin" "$TMP/ssh/config.d"
 
 cat > "$TMP/ssh/config" <<'SSH'
@@ -67,6 +68,13 @@ SH
 cat > "$TMP/bin/fzf" <<'SH'
 #!/usr/bin/env bash
 printf 'fzf %s\n' "$*" >> "$DEV_TEST_LOG"
+case "$*" in
+  *"workspace> "*)
+    IFS= read -r line || exit 1
+    printf '\n%s\n' "$line"
+    exit 0
+    ;;
+esac
 while IFS= read -r line; do
   profile=${line%%	*}
   if [ -z "${DEV_TEST_PICK:-}" ] || [ "$profile" = "$DEV_TEST_PICK" ]; then
@@ -76,7 +84,12 @@ while IFS= read -r line; do
 done
 exit 1
 SH
-chmod +x "$TMP/bin/ssh" "$TMP/bin/code" "$TMP/bin/fzf"
+
+cat > "$TMP/bin/pbcopy" <<'SH'
+#!/usr/bin/env bash
+cat > "$DEV_TEST_CLIPBOARD"
+SH
+chmod +x "$TMP/bin/ssh" "$TMP/bin/code" "$TMP/bin/fzf" "$TMP/bin/pbcopy"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -92,8 +105,8 @@ assert_contains() {
 
 run_dev() {
   PATH="$TMP/bin:$PATH" DEV_TEST_LOG="$LOG" DEV_TEST_MULTI="${DEV_TEST_MULTI:-}" \
-    DEV_TEST_PICK="${DEV_TEST_PICK:-}" DEV_SSH_CONFIG="$TMP/ssh/config" \
-    "$ROOT/dev" "$@"
+    DEV_TEST_PICK="${DEV_TEST_PICK:-}" DEV_TEST_CLIPBOARD="$CLIPBOARD" \
+    DEV_SSH_CONFIG="$TMP/ssh/config" "$ROOT/dev" "$@"
 }
 
 : > "$LOG"
@@ -123,6 +136,20 @@ code_output=$(run_dev -H exe-dash code sample)
 code_calls=$(<"$LOG")
 assert_contains "$code_output" "dev: opened /home/exedev/sample in VS Code"
 assert_contains "$code_calls" "code --remote ssh-remote+ar-general-dev /home/exedev/sample"
+
+: > "$CLIPBOARD"
+copy_output=$(run_dev -H exe-dash copy sample)
+copied_command=$(<"$CLIPBOARD")
+assert_contains "$copy_output" "dev: copied"
+[ "$copied_command" = "dev -H exe-dash -B ar-general-dev herdr -s default /home/exedev/sample" ] ||
+  fail "unexpected copied command: $copied_command"
+
+: > "$CLIPBOARD"
+browse_output=$(run_dev -H exe-dash)
+browse_command=$(<"$CLIPBOARD")
+assert_contains "$browse_output" "dev: copied"
+[ "$browse_command" = "$copied_command" ] ||
+  fail "Enter should copy the same login command"
 
 : > "$LOG"
 profile_ps=$(run_dev -H exe-dash ps)
