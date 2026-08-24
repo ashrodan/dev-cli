@@ -70,22 +70,25 @@ with `←` or finishing a non-terminal action returns to the workspace list.
 
 ## Task workspaces
 
-Press `ctrl-n` in the workspace browser, choose a canonical GitHub project from
-`~/dev`, then choose a GitHub PR, Linear issue, or free-form prompt. The wizard
-loads the task metadata and copies a bootstrap command while the browser stays
-open:
+Press `ctrl-n` in the workspace browser. The project picker starts with
+canonical `~/dev` projects whose repository is already on the selected box;
+choose `+all` to expand it to every local GitHub project. Then choose a GitHub
+PR, Linear issue, or free-form prompt. Linear accepts either an identifier or a
+full issue URL. The wizard loads the task metadata and copies a bootstrap
+command while the browser stays open:
 
 ```sh
-dev -H exe-dash -B ar-general-dev task run dashlytix/dash-ai-agent linear DAS-271
+dev -H exe-dash -B ar-general-dev task run dashlytix/dash-ai-agent linear https://linear.app/dashlytix/issue/DAS-278/enrich-the-look-demo-context-with-business-rules
 ```
 
 Paste that command into a new terminal. It:
 
-1. Checks the selected box for the repository.
+1. Checks the selected box for the canonical repository checkout.
 2. If missing, clones through the existing `github.int.exe.xyz` integration.
-3. Reuses a worktree already on the task branch, or creates and opens one.
-4. Starts OMP with the PR body, Linear issue description, or prompt.
-5. Focuses the herdr workspace and attaches the new terminal.
+3. Reuses a worktree already on the task branch, or creates one.
+4. Opens the task beneath its parent repository workspace.
+5. Starts OMP with the PR body, Linear issue description, or prompt.
+6. Focuses the task workspace and attaches the new terminal.
 
 PRs use their head branch and fetch `pull/<number>/head` when needed. A Linear
 issue reuses the branch from a linked PR in the selected project, falling back

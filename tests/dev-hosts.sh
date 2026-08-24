@@ -8,9 +8,11 @@ LOG="$TMP/calls"
 CLIPBOARD="$TMP/clipboard"
 FZF_STATE="$TMP/fzf-state"
 mkdir -p "$TMP/bin" "$TMP/ssh/config.d"
-mkdir -p "$TMP/projects/sample" "$TMP/projects/sample-worktree"
+mkdir -p "$TMP/projects/sample" "$TMP/projects/sample-worktree" "$TMP/projects/other"
 git -C "$TMP/projects/sample" init -q
 git -C "$TMP/projects/sample" remote add origin git@github.com:dashlytix/sample.git
+git -C "$TMP/projects/other" init -q
+git -C "$TMP/projects/other" remote add origin git@github.com:dashlytix/other.git
 printf 'gitdir: ../sample/.git/worktrees/sample-worktree\n' > "$TMP/projects/sample-worktree/.git"
 
 cat > "$TMP/ssh/config" <<'SSH'
@@ -66,6 +68,13 @@ fi
 
 
 case "$*" in
+  *"worktree list --cwd "*)
+    printf '%s\n' '{"result":{"source":{"source_workspace_id":"w-main"}}}'
+    exit 0
+    ;;
+esac
+
+case "$*" in
   *"git clone "*)
     [ -z "${DEV_TEST_CLONE_FAIL:-}" ] || exit 3
     printf '/home/exedev/sample\n'
@@ -90,6 +99,9 @@ case "$*" in
     ;;
   *"RHOME="*)
     if [ -z "${DEV_TEST_REPO_MISSING:-}" ]; then
+      if [ -n "${DEV_TEST_DUPLICATE_REPO:-}" ]; then
+        printf 'sample\tmain\t/home/exedev/workspace/sample\t\tmain\t\tdef456\tnow\t0\t0\t0\tmessage\n'
+      fi
       printf 'sample\tmain\t/home/exedev/sample\t\tmain\t3000\tabc123\tnow\t0\t0\t0\tmessage\n'
     fi
     ;;
@@ -105,8 +117,20 @@ cat > "$TMP/bin/fzf" <<'SH'
 #!/usr/bin/env bash
 printf 'fzf %s\n' "$*" >> "$DEV_TEST_LOG"
 case "$*" in
+  *"project all> "*)
+    while IFS= read -r line; do
+      printf 'project-all-row %s\n' "$line" >> "$DEV_TEST_LOG"
+      project=${line%%	*}
+      if [ -z "${DEV_TEST_ALL_PROJECT:-}" ] || [ "$project" = "$DEV_TEST_ALL_PROJECT" ]; then
+        printf '%s\n' "$line"
+        exit 0
+      fi
+    done
+    exit 1
+    ;;
   *"project> "*)
     while IFS= read -r line; do
+      printf 'project-row %s\n' "$line" >> "$DEV_TEST_LOG"
       project=${line%%	*}
       if [ -z "${DEV_TEST_PROJECT:-}" ] || [ "$project" = "$DEV_TEST_PROJECT" ]; then
         printf '%s\n' "$line"
@@ -150,6 +174,7 @@ SH
 
 cat > "$TMP/bin/linear" <<'SH'
 #!/usr/bin/env bash
+printf 'linear %s\n' "$*" >> "$DEV_TEST_LOG"
 printf '%s\n' '{"identifier":"DAS-9","title":"Add task workspace","description":"Create the task workflow.","url":"https://linear.app/example/issue/DAS-9","branchName":"ashley/das-9-task-workspace","attachments":{"nodes":[{"metadata":{"repoLogin":"dashlytix","repoName":"sample","branch":"feat/das-9-pr","targetBranch":"main","url":"https://github.com/dashlytix/sample/pull/9"}}]}}'
 SH
 
@@ -181,8 +206,10 @@ assert_not_contains() {
 run_dev() {
   PATH="$TMP/bin:$PATH" DEV_TEST_LOG="$LOG" DEV_TEST_MULTI="${DEV_TEST_MULTI:-}" \
     DEV_TEST_PICK="${DEV_TEST_PICK:-}" DEV_TEST_PROJECT="${DEV_TEST_PROJECT:-}" \
+    DEV_TEST_ALL_PROJECT="${DEV_TEST_ALL_PROJECT:-}" \
     DEV_TEST_REPO_MISSING="${DEV_TEST_REPO_MISSING:-}" DEV_TEST_CLONE_FAIL="${DEV_TEST_CLONE_FAIL:-}" \
     DEV_TEST_INTEGRATION_EXISTS="${DEV_TEST_INTEGRATION_EXISTS:-}" \
+    DEV_TEST_DUPLICATE_REPO="${DEV_TEST_DUPLICATE_REPO:-}" \
     DEV_TEST_EXISTING_WORKTREE="${DEV_TEST_EXISTING_WORKTREE:-}" \
     DEV_TEST_CLIPBOARD="$CLIPBOARD" DEV_TEST_FZF_STATE="$FZF_STATE" \
     DEV_SSH_CONFIG="$TMP/ssh/config" DEV_PROJECT_ROOT="$TMP/projects" "$ROOT/dev" "$@"
@@ -242,12 +269,26 @@ assert_contains "$task_plan_output" "copied task bootstrap for Fix login"
 [ "$task_command" = 'dev -H exe-dash -B ar-general-dev task run dashlytix/sample prompt Fix\ login' ] ||
   fail "unexpected task bootstrap: $task_command"
 
+: > "$LOG"
 : > "$CLIPBOARD"
 wizard_output=$(printf 'Fix login\n' | DEV_TEST_PROJECT=dashlytix/sample run_dev -H exe-dash task 2>/dev/null)
 wizard_command=$(<"$CLIPBOARD")
 assert_contains "$wizard_output" "copied task bootstrap for Fix login"
 [ "$wizard_command" = "$task_command" ] ||
   fail "task wizard should copy the explicit plan command"
+wizard_calls=$(<"$LOG")
+assert_contains "$wizard_calls" "project-row dashlytix/sample"
+assert_not_contains "$wizard_calls" "project-row dashlytix/other"
+
+: > "$CLIPBOARD"
+: > "$LOG"
+expanded_output=$(printf 'Fix other\n' |
+  DEV_TEST_PROJECT=+all DEV_TEST_ALL_PROJECT=dashlytix/other run_dev -H exe-dash task 2>/dev/null)
+expanded_command=$(<"$CLIPBOARD")
+assert_contains "$expanded_output" "copied task bootstrap for Fix other"
+assert_contains "$expanded_command" "task run dashlytix/other prompt Fix\\ other"
+expanded_calls=$(<"$LOG")
+assert_contains "$expanded_calls" "project-all-row dashlytix/other"
 
 : > "$CLIPBOARD"
 pr_plan_output=$(run_dev -H exe-dash task plan dashlytix/sample pr 125)
@@ -263,11 +304,24 @@ assert_contains "$linear_plan_output" "copied task bootstrap for Add task worksp
 [ "$linear_command" = "dev -H exe-dash -B ar-general-dev task run dashlytix/sample linear DAS-9" ] ||
   fail "unexpected Linear bootstrap: $linear_command"
 
+: > "$CLIPBOARD"
 : > "$LOG"
-pr_run_output=$(run_dev -H exe-dash task run dashlytix/sample pr 125)
+linear_url='https://linear.app/dashlytix/issue/DAS-9/add-task-workspace'
+linear_url_output=$(run_dev -H exe-dash task plan dashlytix/sample linear "$linear_url")
+linear_url_command=$(<"$CLIPBOARD")
+assert_contains "$linear_url_output" "copied task bootstrap for Add task workspace"
+assert_contains "$linear_url_command" "$linear_url"
+linear_url_calls=$(<"$LOG")
+assert_contains "$linear_url_calls" "linear issue view DAS-9 --json --no-comments"
+
+: > "$LOG"
+pr_run_output=$(DEV_TEST_DUPLICATE_REPO=1 run_dev -H exe-dash task run dashlytix/sample pr 125)
 pr_run_calls=$(<"$LOG")
 assert_contains "$pr_run_output" "preparing pr-125"
 assert_contains "$pr_run_calls" "fetch origin pull/125/head:refs/heads/feat/pr-125"
+assert_contains "$pr_run_calls" "worktree open --workspace w-main"
+assert_contains "$pr_run_calls" "git -C /home/exedev/sample show-ref"
+assert_not_contains "$pr_run_calls" "git -C /home/exedev/workspace/sample"
 assert_contains "$pr_run_calls" "agent start pr-125 --kind omp"
 
 : > "$LOG"
@@ -290,7 +344,7 @@ reuse_output=$(DEV_TEST_EXISTING_WORKTREE=1 \
   run_dev -H exe-dash task run dashlytix/sample prompt "Fix login")
 reuse_calls=$(<"$LOG")
 assert_contains "$reuse_output" "preparing prompt-fix-login"
-assert_contains "$reuse_calls" "worktree open --path /home/exedev/worktrees/sample/existing"
+assert_contains "$reuse_calls" "worktree open --workspace w-main --path /home/exedev/worktrees/sample/existing"
 assert_not_contains "$reuse_calls" "worktree create"
 
 : > "$LOG"

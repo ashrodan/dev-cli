@@ -544,18 +544,45 @@ for project, (_, path) in sorted(repos.items()):
 ' "${DEV_PROJECT_ROOT:-$HOME/dev}"
 }
 
+box_repo_names() {
+  scan 2>/dev/null |
+    awk -F'\t' '$5 == "main" && !seen[$1]++ { print $1 }'
+}
+
 pick_project() {
   need fzf
-  local choice
-  choice=$(local_projects |
-           fzf --prompt='project> ' --reverse --height=50% --delimiter=$'\t' \
-               --with-nth=1,2 --header='GitHub project    canonical local checkout') ||
+  local projects box_repos shortlist choice project
+  projects=$(local_projects)
+  [ -n "$projects" ] || die "no canonical GitHub projects found under ${DEV_PROJECT_ROOT:-$HOME/dev}"
+  box_repos=$(box_repo_names || true)
+  shortlist=$(awk -F'\t' '
+      NR == FNR { box[$1] = 1; next }
+      { name = $1; sub(/^.*\//, "", name); if (box[name]) print }
+    ' <(printf '%s\n' "$box_repos") <(printf '%s\n' "$projects"))
+
+  if [ -n "$shortlist" ]; then
+    choice=$({ printf '%s\n' "$shortlist"
+              printf '+all\tshow all local GitHub projects\n'
+            } |
+             fzf --prompt='project> ' --reverse --height=50% --delimiter=$'\t' \
+                 --with-nth=1,2 --header='Projects already on this box') ||
+      return 1
+    project=$(printf '%s' "$choice" | cut -f1)
+    if [ "$project" != "+all" ]; then
+      printf '%s\n' "$project"
+      return 0
+    fi
+  fi
+
+  choice=$(printf '%s\n' "$projects" |
+           fzf --prompt='project all> ' --reverse --height=50% --delimiter=$'\t' \
+               --with-nth=1,2 --header='All canonical local GitHub projects') ||
     return 1
   printf '%s' "$choice" | cut -f1
 }
 
 load_task_metadata() {
-  local project="$1" kind="$2" ref="$3" json metadata prompt_slug
+  local project="$1" kind="$2" ref="$3" json metadata prompt_slug linear_ref
   case "$project" in
     */*) ;;
     *) die "project must be OWNER/REPO: $project" ;;
@@ -591,8 +618,16 @@ print("\x1f".join(fields))
       ;;
     linear)
       need linear
-      json=$(linear issue view "$ref" --json --no-comments) ||
-        die "could not load Linear issue $ref"
+      linear_ref="$ref"
+      case "$linear_ref" in
+        http://linear.app/*/issue/*|https://linear.app/*/issue/*)
+          linear_ref="${linear_ref#*/issue/}"
+          linear_ref="${linear_ref%%/*}"
+          ;;
+      esac
+      [ -n "$linear_ref" ] || die "could not determine Linear issue identifier from $ref"
+      json=$(linear issue view "$linear_ref" --json --no-comments) ||
+        die "could not load Linear issue $linear_ref"
       metadata=$(printf '%s' "$json" | python3 -c '
 import base64, json, re, sys
 d = json.load(sys.stdin)
@@ -678,7 +713,7 @@ task_wizard() {
   kind="${choice%% *}"
   case "$kind" in
     pr)     printf 'PR number or URL: ' >&2 ;;
-    linear) printf 'Linear issue identifier: ' >&2 ;;
+    linear) printf 'Linear issue identifier or URL: ' >&2 ;;
     prompt) printf 'Task prompt: ' >&2 ;;
   esac
   read -r ref || return 1
@@ -691,7 +726,13 @@ ensure_remote_repo() {
   repo_name="${project##*/}"
   data=$(scan 2>/dev/null || true)
   path=$(printf '%s\n' "$data" |
-         awk -F'\t' -v repo="$repo_name" '$1 == repo && $5 == "main" { print $3; exit }')
+         awk -F'\t' -v repo="$repo_name" -v preferred="$RHOME/$repo_name" '
+           $1 == repo && $5 == "main" {
+             if ($3 == preferred) { print $3; found = 1; exit }
+             if (best == "" || length($3) < length(best)) best = $3
+           }
+           END { if (!found && best != "") print best }
+         ')
   if [ -n "$path" ]; then
     printf '%s\n' "$path"
     return 0
@@ -782,11 +823,22 @@ except Exception:
 }
 
 launch_task_workspace() {
-  local path="$1" created="$2" qpath opened fields workspace pane agent already
-  local name qname qpane qprompt qsession
+  local path="$1" created="$2" repo="$3" qpath qrepo opened source fields workspace pane agent already
+  local name qname qpane qprompt qsession qsource
   printf -v qpath '%q' "$path"
+  printf -v qrepo '%q' "$repo"
   printf -v qsession '%q' "$SESSION"
-  opened=$(ssh_remote "$HERDR --session $qsession worktree open --path $qpath --focus") ||
+  source=$(ssh_remote "$HERDR --session $qsession worktree list --cwd $qrepo" |
+           python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get("result", {}).get("source", {}).get("source_workspace_id") or "")
+except Exception:
+    pass
+')
+  [ -n "$source" ] || die "herdr did not return the parent workspace for $repo"
+  printf -v qsource '%q' "$source"
+  opened=$(ssh_remote "$HERDR --session $qsession worktree open --workspace $qsource --path $qpath --focus") ||
     die "could not open task workspace $path"
   fields=$(printf '%s' "$opened" | python3 -c '
 import json, sys
@@ -836,7 +888,7 @@ task_run() {
   result=$(ensure_task_worktree "$repo") || return 1
   path="${result%%$'\037'*}"
   created="${result#*$'\037'}"
-  launch_task_workspace "$path" "$created"
+  launch_task_workspace "$path" "$created" "$repo"
 }
 
 cmd_task() {
