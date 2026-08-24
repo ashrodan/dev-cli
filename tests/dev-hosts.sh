@@ -80,6 +80,25 @@ case "$*" in
     exit 0
     ;;
 esac
+case "$*" in
+  *"remote get-url origin"*"branch --show-current"*)
+    printf 'https://github.int.exe.xyz/dashlytix/sample.git\n'
+    printf '%s\n' "${DEV_TEST_PR_BRANCH:-feat/pr-125}"
+    exit 0
+    ;;
+esac
+
+case "$*" in
+  *"log -1 --format=%s"*)
+    printf 'Fix task workspace\n'
+    exit 0
+    ;;
+  *"log --reverse --format="*)
+    printf '%s\n' '- Fix task workspace' '' 'Implement the requested workflow.'
+    exit 0
+    ;;
+esac
+
 
 case "$*" in
   *"git clone "*)
@@ -182,7 +201,27 @@ SH
 
 cat > "$TMP/bin/gh" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' '{"number":125,"title":"Fix task workspace","body":"Implement the requested workflow.","headRefName":"feat/pr-125","baseRefName":"main","url":"https://github.com/dashlytix/sample/pull/125"}'
+printf 'gh %s\n' "$*" >> "$DEV_TEST_LOG"
+case "$*" in
+  *"repo view "*)
+    printf 'main\n'
+    ;;
+  *"pr list "*)
+    [ -z "${DEV_TEST_EXISTING_PR:-}" ] ||
+      printf 'https://github.com/dashlytix/sample/pull/125\n'
+    ;;
+  *"pr create "*)
+    printf 'https://github.com/dashlytix/sample/pull/126\n'
+    ;;
+  *)
+    printf '%s\n' '{"number":125,"title":"Fix task workspace","body":"Implement the requested workflow.","headRefName":"feat/pr-125","baseRefName":"main","url":"https://github.com/dashlytix/sample/pull/125"}'
+    ;;
+esac
+SH
+
+cat > "$TMP/bin/open" <<'SH'
+#!/usr/bin/env bash
+printf 'open %s\n' "$*" >> "$DEV_TEST_LOG"
 SH
 
 cat > "$TMP/bin/linear" <<'SH'
@@ -195,7 +234,7 @@ cat > "$TMP/bin/pbcopy" <<'SH'
 #!/usr/bin/env bash
 cat > "$DEV_TEST_CLIPBOARD"
 SH
-chmod +x "$TMP/bin/ssh" "$TMP/bin/code" "$TMP/bin/fzf" "$TMP/bin/gh" "$TMP/bin/linear" "$TMP/bin/pbcopy"
+chmod +x "$TMP/bin/ssh" "$TMP/bin/code" "$TMP/bin/fzf" "$TMP/bin/gh" "$TMP/bin/linear" "$TMP/bin/pbcopy" "$TMP/bin/open"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -224,6 +263,7 @@ run_dev() {
     DEV_TEST_INTEGRATION_EXISTS="${DEV_TEST_INTEGRATION_EXISTS:-}" \
     DEV_TEST_DUPLICATE_REPO="${DEV_TEST_DUPLICATE_REPO:-}" \
     DEV_TEST_CROSS_REPO_WORKTREE="${DEV_TEST_CROSS_REPO_WORKTREE:-}" \
+    DEV_TEST_PR_BRANCH="${DEV_TEST_PR_BRANCH:-}" DEV_TEST_EXISTING_PR="${DEV_TEST_EXISTING_PR:-}" \
     DEV_TEST_EXISTING_WORKTREE="${DEV_TEST_EXISTING_WORKTREE:-}" \
     DEV_TEST_CLIPBOARD="$CLIPBOARD" DEV_TEST_FZF_STATE="$FZF_STATE" \
     DEV_SSH_CONFIG="$TMP/ssh/config" DEV_PROJECT_ROOT="$TMP/projects" "$ROOT/dev" "$@"
@@ -347,6 +387,24 @@ assert_contains "$cross_reuse_calls" "git -C /home/exedev/workspace/sample workt
 assert_contains "$cross_reuse_calls" "worktree open --workspace w-main --path /home/exedev/worktrees/sample/cross-existing"
 assert_not_contains "$cross_reuse_calls" "worktree create"
 assert_contains "$pr_run_calls" "agent start pr-125 --kind omp"
+assert_contains "$pr_run_calls" "do not require GH_TOKEN"
+assert_contains "$pr_run_calls" "dev -H exe-dash -B ar-general-dev pr feat/pr-125"
+
+: > "$LOG"
+pr_create_output=$(DEV_TEST_CROSS_REPO_WORKTREE=1 DEV_TEST_PR_BRANCH=feat/pr-125 \
+  run_dev -H exe-dash pr feat/pr-125)
+pr_create_calls=$(<"$LOG")
+assert_contains "$pr_create_output" "creating draft PR"
+assert_contains "$pr_create_calls" "gh pr list --repo dashlytix/sample --head feat/pr-125 --state open"
+assert_contains "$pr_create_calls" "gh pr create --draft --repo dashlytix/sample --head feat/pr-125 --base main --title Fix task workspace --body"
+assert_contains "$pr_create_calls" "open https://github.com/dashlytix/sample/pull/126"
+: > "$LOG"
+pr_existing_output=$(DEV_TEST_CROSS_REPO_WORKTREE=1 DEV_TEST_PR_BRANCH=feat/pr-125 \
+  DEV_TEST_EXISTING_PR=1 run_dev -H exe-dash pr feat/pr-125)
+pr_existing_calls=$(<"$LOG")
+assert_contains "$pr_existing_output" "found existing PR"
+assert_not_contains "$pr_existing_calls" "gh pr create"
+assert_contains "$pr_existing_calls" "open https://github.com/dashlytix/sample/pull/125"
 
 : > "$LOG"
 linear_run_output=$(run_dev -H exe-dash task run dashlytix/sample linear DAS-9)

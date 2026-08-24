@@ -19,6 +19,7 @@
 #   dev code [query]                 open in VS Code
 #   dev herdr [query]                attach the herdr session there
 #   dev copy [query]                copy the herdr login command
+#   dev pr [query]                    create/open its draft PR with local gh auth
 #   dev task                         select project + PR, Linear issue, or prompt
 #   dev herdr -S [query]             ...picking the session first
 #   dev herdr -s NAME [query]        ...in a named session (created if new)
@@ -388,6 +389,66 @@ copy_herdr_command() {
   command=$(herdr_login_command "$1" "${2:-$SESSION}")
   printf '%s' "$command" | clipboard_write
   printf 'dev: copied %s\n' "$command"
+}
+
+pr_handoff_command() {
+  local branch="$1" command
+  printf -v command 'dev -H %q' "$REMOTE"
+  if [ -n "$BOX" ]; then
+    printf -v command '%s -B %q' "$command" "$BOX"
+  fi
+  printf -v command '%s pr %q' "$command" "$branch"
+  printf '%s\n' "$command"
+}
+
+open_pull_request() {
+  need gh
+  local path="$1" qpath metadata remote_url branch project url base title body range qrange
+  printf -v qpath '%q' "$path"
+  metadata=$(ssh_remote "git -C $qpath remote get-url origin &&
+                         git -C $qpath branch --show-current") ||
+    die "could not read GitHub metadata from $path"
+  remote_url="${metadata%%$'\n'*}"
+  branch="${metadata#*$'\n'}"
+  [ "$branch" != "$metadata" ] && [ -n "$branch" ] ||
+    die "could not determine the branch for $path"
+  project=$(printf '%s' "$remote_url" | python3 -c '
+import sys
+from urllib.parse import urlparse
+url = sys.stdin.read().strip()
+if url.startswith("git@") and ":" in url:
+    url = "ssh://" + url.replace(":", "/", 1)
+parsed = urlparse(url)
+path = parsed.path if parsed.scheme else url
+parts = [part for part in path.removesuffix(".git").split("/") if part]
+print("/".join(parts[-2:]) if len(parts) >= 2 else "")
+')
+  [ -n "$project" ] || die "could not determine OWNER/REPO from $remote_url"
+
+  url=$(gh pr list --repo "$project" --head "$branch" --state open \
+           --limit 1 --json url --jq '.[0].url // ""') ||
+    die "could not query pull requests for $project"
+  if [ -z "$url" ]; then
+    base=$(gh repo view "$project" --json defaultBranchRef --jq '.defaultBranchRef.name') ||
+      die "could not determine the default branch for $project"
+    [ -n "$base" ] || die "GitHub did not return a default branch for $project"
+    title=$(ssh_remote "git -C $qpath log -1 --format=%s") ||
+      die "could not read the latest commit title from $path"
+    [ -n "$title" ] || die "the task branch has no commit title"
+    range="origin/$base..HEAD"
+    printf -v qrange '%q' "$range"
+    body=$(ssh_remote "git -C $qpath log --reverse --format='- %s%n%n%b' $qrange") ||
+      die "could not build the PR body from $range"
+    [ -n "$body" ] || body="$title"
+    printf 'dev: creating draft PR for %s:%s with local GitHub auth\n' "$project" "$branch"
+    url=$(gh pr create --draft --repo "$project" --head "$branch" --base "$base" \
+             --title "$title" --body "$body") ||
+      die "could not create a draft PR. Confirm the branch is pushed and local gh auth can access $project"
+  else
+    printf 'dev: found existing PR for %s:%s\n' "$project" "$branch"
+  fi
+  printf 'dev: opening %s\n' "$url"
+  open "$url"
 }
 
 # --- herdr sessions --------------------------------------------------------
@@ -897,6 +958,13 @@ task_run() {
   [ $# -ge 3 ] || die "usage: dev task run OWNER/REPO pr|linear|prompt REF"
   local project="$1" kind="$2" ref="$3" repo result path created
   load_task_metadata "$project" "$kind" "$ref"
+  local pr_command
+  pr_command=$(pr_handoff_command "$TASK_BRANCH")
+  TASK_PROMPT="$TASK_PROMPT
+
+After pushing the branch, do not require GH_TOKEN on the box. Tell the user to create
+or open the draft pull request with local GitHub auth by running:
+$pr_command"
   printf 'dev: preparing %s — %s\n' "$TASK_ID" "$TASK_TITLE"
   repo=$(ensure_remote_repo "$project") || return 1
   result=$(ensure_task_worktree "$repo") || return 1
@@ -922,6 +990,7 @@ action_menu() {
   [ -n "$ports" ] && srv="$ports"
   out=$(printf '%s\n' \
     "copy     copy herdr login command" \
+    "pr       create or open its draft PR with local gh auth" \
     "task     create a task worktree and OMP bootstrap" \
     "herdr    attach the herdr session here" \
     "session  attach here in another herdr session" \
@@ -941,6 +1010,7 @@ action_menu() {
   case "${choice%% *}" in
     copy)    copy_herdr_command "$path" ;;
     task)    cmd_task ;;
+    pr)      open_pull_request "$path" ;;
     herdr)   open_herdr "$path" ;;
     session) local sess; sess=$(pick_session) || return 0; open_herdr "$path" "$sess" ;;
     code)    open_code "$path" ;;
@@ -1297,6 +1367,7 @@ main() {
     ask|\?)    shift; cmd_ask "$@" ;;
     rm|remove) shift; refresh_cache; resolve "${1:-}" && rm_worktree "$REPLY_PATH" ;;
     code)      shift; refresh_cache; resolve "${1:-}" && open_code "$REPLY_PATH" ;;
+    pr)        shift; refresh_cache; resolve "${1:-}" && open_pull_request "$REPLY_PATH" ;;
     copy|cp)  shift; refresh_cache; resolve "${1:-}" && copy_herdr_command "$REPLY_PATH" ;;
     task|work) shift; cmd_task "$@" ;;
     herdr|h)   shift

@@ -33,7 +33,8 @@ dev new [repo] <branch> [--base ref]
 dev code  [query]       open in VS Code, skipping the picker on a unique match
 dev herdr [query]       attach herdr, same matching
 dev copy [query]        copy login command without attaching
-dev task               select a project and prepare a task workspace
+dev pr [query]          create or open its draft PR using local `gh` auth
+dev task                select a project and prepare a task workspace
 dev herdr -S [query]    pick the session first
 dev herdr -s NAME       attach in a named session, created if it does not exist
 dev sessions            list herdr sessions on the box
@@ -100,6 +101,19 @@ changing account configuration and prints the exact attach or add command.
 
 The standalone entry point is `dev -P task`. Scripts can bypass the wizard with
 `dev task plan OWNER/REPO pr|linear|prompt REF`.
+
+Remote agents do not need `GH_TOKEN`. Their task prompt tells them to hand back a
+local command such as:
+
+```sh
+dev -H exe-dash -B ar-general-dev pr ashleyrodan/das-278-enrich-the-look-demo-context-with-business-rules
+```
+
+Run it on the laptop, where `gh` is already authenticated. `dev` resolves the
+remote worktree's repository and branch, opens an existing PR when one exists,
+or derives a title and body from its remote commits, creates a draft with local
+`gh` authentication, and opens it. The same action is available as `pr` in a
+worktree's `→` menu.
 
 ## Sessions
 
