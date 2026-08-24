@@ -87,6 +87,13 @@ case "$*" in
     exit 0
     ;;
 esac
+case "$*" in
+  *"gh api graphql"*)
+    printf 'exe-dev-github-integration[bot]\n'
+    exit 0
+    ;;
+esac
+
 
 case "$*" in
   *"log -1 --format=%s"*)
@@ -387,8 +394,23 @@ assert_contains "$cross_reuse_calls" "git -C /home/exedev/workspace/sample workt
 assert_contains "$cross_reuse_calls" "worktree open --workspace w-main --path /home/exedev/worktrees/sample/cross-existing"
 assert_not_contains "$cross_reuse_calls" "worktree create"
 assert_contains "$pr_run_calls" "agent start pr-125 --kind omp"
-assert_contains "$pr_run_calls" "do not require GH_TOKEN"
+assert_contains "$pr_run_calls" "GH_TOKEN is not expected"
+assert_contains "$pr_run_calls" "github.int.exe.xyz"
 assert_contains "$pr_run_calls" "dev -H exe-dash -B ar-general-dev pr feat/pr-125"
+
+: > "$LOG"
+github_setup_output=$(run_dev -H exe-dash github setup)
+github_setup_calls=$(<"$LOG")
+assert_contains "$github_setup_output" "installed tokenless gh wrapper"
+assert_contains "$github_setup_output" "remote gh actor: exe-dev-github-integration[bot]"
+assert_contains "$github_setup_calls" "base64 -d >"
+assert_contains "$github_setup_calls" ".local/bin/gh"
+
+: > "$LOG"
+github_status_output=$(run_dev -H exe-dash github status)
+github_status_calls=$(<"$LOG")
+assert_contains "$github_status_output" "remote gh actor: exe-dev-github-integration[bot]"
+assert_contains "$github_status_calls" "gh api graphql"
 
 : > "$LOG"
 pr_create_output=$(DEV_TEST_CROSS_REPO_WORKTREE=1 DEV_TEST_PR_BRANCH=feat/pr-125 \
@@ -468,6 +490,7 @@ help_output=$(run_dev -H exe-dash --help)
 help_calls=$(<"$LOG")
 assert_contains "$help_output" "pick an exe.dev SSH profile"
 assert_contains "$help_output" "dev task"
+assert_contains "$help_output" "dev github setup"
 [ -z "$help_calls" ] || fail "help should not invoke SSH: $help_calls"
 
 printf 'dev-hosts: all checks passed\n'

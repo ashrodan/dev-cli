@@ -34,6 +34,8 @@ dev code  [query]       open in VS Code, skipping the picker on a unique match
 dev herdr [query]       attach herdr, same matching
 dev copy [query]        copy login command without attaching
 dev pr [query]          create or open its draft PR using local `gh` auth
+dev github setup        install tokenless `gh` integration wrapper on the box
+dev github status       show the GitHub actor used by remote `gh`
 dev task                select a project and prepare a task workspace
 dev herdr -S [query]    pick the session first
 dev herdr -s NAME       attach in a named session, created if it does not exist
@@ -102,17 +104,39 @@ changing account configuration and prints the exact attach or add command.
 The standalone entry point is `dev -P task`. Scripts can bypass the wizard with
 `dev task plan OWNER/REPO pr|linear|prompt REF`.
 
-Remote agents do not need `GH_TOKEN`. Their task prompt tells them to hand back a
-local command such as:
+Remote agents do not need `GH_TOKEN`. exe.dev injects the attached GitHub App
+credential at the network edge when `gh` uses `github.int.exe.xyz`. Configure
+that default once per box and verify its API actor:
 
 ```sh
-dev -H exe-dash -B ar-general-dev pr ashleyrodan/das-278-enrich-the-look-demo-context-with-business-rules
+dev -H exe-dash -B ar-general-dev github setup
+dev -H exe-dash -B ar-general-dev github status
 ```
 
-Run it on the laptop, where `gh` is already authenticated. `dev` resolves the
-remote worktree's repository and branch, opens an existing PR when one exists,
-or derives a title and body from its remote commits, creates a draft with local
-`gh` authentication, and opens it. The same action is available as `pr` in a
+`setup` installs `~/.local/bin/gh`, which preserves an explicit `GH_HOST` and
+otherwise delegates to `/bin/gh` with `GH_HOST=github.int.exe.xyz`. This works
+for already-running herdr and OMP processes because their `PATH` already puts
+`~/.local/bin` first. Task prompts tell agents to use remote `gh` after pushing.
+
+Personal exe.dev GitHub integrations can attribute API calls and pushes to the
+linked GitHub user:
+
+```sh
+ssh exe-dash integrations edit INTEGRATION_NAME --act-as-user
+```
+
+exe.dev rejects `--act-as-user` for team integrations because it would let
+teammates act as one person's account. Those integrations continue as
+`exe-dev-github-integration[bot]`. When user attribution is required, use the
+local fallback:
+
+```sh
+dev -H exe-dash -B ar-general-dev pr BRANCH
+```
+
+It resolves the remote repository and branch, opens an existing PR when one
+exists, or derives title/body from remote commits and creates a draft using the
+laptop's `gh` authentication. The same action is available as `pr` in a
 worktree's `→` menu.
 
 ## Sessions
@@ -265,7 +289,7 @@ a live subscription — re-import when the fleet changes.
 
 Local: `bash`, `fzf`, `python3`, `ssh`, and the `code` CLI for the VS Code path.
 Task workspaces additionally use `gh` for PRs and `linear` for Linear issues.
-Remote: `herdr`, `omp`, `git`, and `python3`.
+Remote: `herdr`, `omp`, `git`, `gh`, and `python3`.
 
 An SSH host alias for the box — the default is `dai`. Put each box's key on its
 own alias; `dev -H work-box` uses the same `HostName`, `User`, `IdentityFile`,

@@ -20,6 +20,7 @@
 #   dev herdr [query]                attach the herdr session there
 #   dev copy [query]                copy the herdr login command
 #   dev pr [query]                    create/open its draft PR with local gh auth
+#   dev github setup|status           configure/check tokenless gh on the box
 #   dev task                         select project + PR, Linear issue, or prompt
 #   dev herdr -S [query]             ...picking the session first
 #   dev herdr -s NAME [query]        ...in a named session (created if new)
@@ -449,6 +450,41 @@ print("/".join(parts[-2:]) if len(parts) >= 2 else "")
   fi
   printf 'dev: opening %s\n' "$url"
   open "$url"
+}
+
+github_cli_status() {
+  local actor
+  actor=$(ssh_remote "export PATH=\$HOME/.local/bin:\$PATH
+    gh api graphql -f query='{ viewer { login } }' --jq .data.viewer.login") ||
+    die "remote gh could not use the exe.dev GitHub integration; run: dev github setup"
+  [ -n "$actor" ] || die "GitHub integration returned an empty API actor"
+  printf 'dev: remote gh actor: %s\n' "$actor"
+}
+
+github_cli_setup() {
+  local payload qpayload
+  payload=$(printf '%s\n' \
+    '#!/usr/bin/env sh' \
+    'export GH_HOST="${GH_HOST:-github.int.exe.xyz}"' \
+    'exec /bin/gh "$@"' |
+    base64 | tr -d '\n')
+  printf -v qpayload '%q' "$payload"
+  ssh_remote "
+    [ -x /bin/gh ] || { printf 'gh is not installed at /bin/gh\n' >&2; exit 1; }
+    mkdir -p \$HOME/.local/bin
+    printf %s $qpayload | base64 -d > \$HOME/.local/bin/gh
+    chmod 0755 \$HOME/.local/bin/gh
+  " || die "could not install the remote gh wrapper"
+  printf 'dev: installed tokenless gh wrapper on %s\n' "${BOX:-$REMOTE}"
+  github_cli_status
+}
+
+cmd_github() {
+  case "${1:-status}" in
+    setup) github_cli_setup ;;
+    status) github_cli_status ;;
+    *) die "usage: dev github setup|status" ;;
+  esac
 }
 
 # --- herdr sessions --------------------------------------------------------
@@ -962,8 +998,10 @@ task_run() {
   pr_command=$(pr_handoff_command "$TASK_BRANCH")
   TASK_PROMPT="$TASK_PROMPT
 
-After pushing the branch, do not require GH_TOKEN on the box. Tell the user to create
-or open the draft pull request with local GitHub auth by running:
+After pushing the branch, use gh on the box to create or open the pull request.
+The exe.dev GitHub integration supplies authentication through github.int.exe.xyz;
+GH_TOKEN is not expected. If the integration rejects the write, tell the user to
+use local GitHub auth by running:
 $pr_command"
   printf 'dev: preparing %s — %s\n' "$TASK_ID" "$TASK_TITLE"
   repo=$(ensure_remote_repo "$project") || return 1
@@ -1364,6 +1402,7 @@ main() {
     ps)        shift; cmd_ps "$@" ;;
     new|add)   shift; cmd_new "$@" ;;
     env)       shift; cmd_env "$@" ;;
+    github)    shift; cmd_github "$@" ;;
     ask|\?)    shift; cmd_ask "$@" ;;
     rm|remove) shift; refresh_cache; resolve "${1:-}" && rm_worktree "$REPLY_PATH" ;;
     code)      shift; refresh_cache; resolve "${1:-}" && open_code "$REPLY_PATH" ;;
