@@ -10,6 +10,7 @@
 #                      ctrl-o  VS Code     ctrl-h  herdr
 #                      ctrl-s  herdr, in a chosen or new session
 #                      ctrl-p  preview     ctrl-e  env push
+#                      ctrl-n  new task workspace
 #                      ctrl-r  refresh
 #   dev ls           list every worktree, with any servers it is running
 #   dev ps           list listening servers on the box, with preview URLs
@@ -18,6 +19,7 @@
 #   dev code [query]                 open in VS Code
 #   dev herdr [query]                attach the herdr session there
 #   dev copy [query]                copy the herdr login command
+#   dev task                         select project + PR, Linear issue, or prompt
 #   dev herdr -S [query]             ...picking the session first
 #   dev herdr -s NAME [query]        ...in a named session (created if new)
 #   dev sessions                     list herdr sessions on the box
@@ -485,6 +487,367 @@ open_preview() {
   open "$url"
 }
 
+# --- task workspaces -------------------------------------------------------
+TASK_ID=""
+TASK_TITLE=""
+TASK_BRANCH=""
+TASK_BASE=""
+TASK_PROMPT=""
+TASK_NUMBER=""
+
+slugify() {
+  printf '%s' "$1" |
+    tr '[:upper:]' '[:lower:]' |
+    sed 's/[^a-z0-9._-][^a-z0-9._-]*/-/g; s/^-*//; s/-*$//; s/^\(.\{1,56\}\).*$/\1/'
+}
+
+local_projects() {
+  python3 -c '
+import os
+import pathlib
+import subprocess
+import sys
+from urllib.parse import urlparse
+
+root = pathlib.Path(os.path.expanduser(sys.argv[1]))
+repos = {}
+
+def slug(url):
+    url = url.strip()
+    if url.startswith("git@") and ":" in url:
+        url = "ssh://" + url.replace(":", "/", 1)
+    parsed = urlparse(url)
+    path = parsed.path if parsed.scheme else url
+    parts = [part for part in path.removesuffix(".git").split("/") if part]
+    return "/".join(parts[-2:]) if len(parts) >= 2 else ""
+
+if root.is_dir():
+    for path in root.iterdir():
+        if not path.is_dir() or not (path / ".git").exists():
+            continue
+        try:
+            remote = subprocess.check_output(
+                ["git", "-C", str(path), "remote", "get-url", "origin"],
+                text=True, stderr=subprocess.DEVNULL).strip()
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        project = slug(remote)
+        if not project:
+            continue
+        rank = (0 if (path / ".git").is_dir() else 1, len(str(path)))
+        current = repos.get(project)
+        if current is None or rank < current[0]:
+            repos[project] = (rank, str(path))
+
+for project, (_, path) in sorted(repos.items()):
+    print(project + "\t" + path)
+' "${DEV_PROJECT_ROOT:-$HOME/dev}"
+}
+
+pick_project() {
+  need fzf
+  local choice
+  choice=$(local_projects |
+           fzf --prompt='project> ' --reverse --height=50% --delimiter=$'\t' \
+               --with-nth=1,2 --header='GitHub project    canonical local checkout') ||
+    return 1
+  printf '%s' "$choice" | cut -f1
+}
+
+load_task_metadata() {
+  local project="$1" kind="$2" ref="$3" json metadata prompt_slug
+  case "$project" in
+    */*) ;;
+    *) die "project must be OWNER/REPO: $project" ;;
+  esac
+
+  case "$kind" in
+    pr)
+      need gh
+      json=$(gh pr view "$ref" -R "$project" \
+             --json number,title,body,headRefName,baseRefName,url) ||
+        die "could not load PR $ref from $project"
+      metadata=$(printf '%s' "$json" | python3 -c '
+import base64, json, sys
+d = json.load(sys.stdin)
+n = str(d["number"])
+title = d.get("title") or ("PR #" + n)
+body = d.get("body") or "(no PR body)"
+prompt = """Work on GitHub PR #{number}: {title}
+URL: {url}
+Base branch: {base}
+
+Treat the existing branch, diff, PR body, and review feedback as the source of truth.
+Finish the requested work end to end, verify it, and leave the branch ready to push.
+
+PR body:
+{body}""".format(number=n, title=title, url=d.get("url",""),
+                 base=d.get("baseRefName",""), body=body)
+fields = ["pr-" + n, title, d.get("headRefName") or ("pr/" + n),
+          "origin/" + (d.get("baseRefName") or "main"),
+          base64.b64encode(prompt.encode()).decode(), n]
+print("\x1f".join(fields))
+')
+      ;;
+    linear)
+      need linear
+      json=$(linear issue view "$ref" --json --no-comments) ||
+        die "could not load Linear issue $ref"
+      metadata=$(printf '%s' "$json" | python3 -c '
+import base64, json, re, sys
+d = json.load(sys.stdin)
+project = sys.argv[1]
+identifier = d.get("identifier") or ""
+title = d.get("title") or identifier
+fallback = "work/" + re.sub(r"[^a-z0-9]+", "-", (identifier + "-" + title).lower()).strip("-")[:56]
+attachment = None
+for node in (d.get("attachments") or {}).get("nodes", []):
+    meta = node.get("metadata") or {}
+    attached_project = (meta.get("repoLogin","") + "/" + meta.get("repoName","")).strip("/")
+    if attached_project.lower() == project.lower() and meta.get("branch"):
+        attachment = meta
+        break
+branch = (attachment or {}).get("branch") or d.get("branchName") or fallback
+base = "origin/" + ((attachment or {}).get("targetBranch") or "main") if attachment else ""
+linked_pr = ("\nLinked PR: " + attachment.get("url","")) if attachment else ""
+prompt = """Work on Linear issue {identifier}: {title}
+URL: {url}{linked_pr}
+
+Treat this issue as the source of truth. Implement it completely, verify the observable
+behavior, and keep the issue scope explicit.
+
+Issue description:
+{description}""".format(identifier=identifier, title=title, url=d.get("url",""),
+                        linked_pr=linked_pr,
+                        description=d.get("description") or "(no description)")
+fields = [identifier.lower(), title, branch, base,
+          base64.b64encode(prompt.encode()).decode(), identifier]
+print("\x1f".join(fields))
+' "$project")
+      ;;
+    prompt)
+      prompt_slug=$(slugify "$ref")
+      [ -n "$prompt_slug" ] || prompt_slug="task"
+      TASK_ID="prompt-$prompt_slug"
+      TASK_TITLE="$ref"
+      TASK_BRANCH="work/$(date +%Y%m%d)-$prompt_slug"
+      TASK_BASE=""
+      TASK_PROMPT="Work on this task end to end: $ref"
+      TASK_NUMBER=""
+      return 0
+      ;;
+    *)
+      die "task type must be pr, linear, or prompt"
+      ;;
+  esac
+
+  IFS=$'\037' read -r TASK_ID TASK_TITLE TASK_BRANCH TASK_BASE TASK_PROMPT TASK_NUMBER \
+    <<< "$metadata"
+  TASK_PROMPT=$(printf '%s' "$TASK_PROMPT" | base64 -d)
+  [ -n "$TASK_BRANCH" ] || die "task source did not provide a branch"
+}
+
+task_bootstrap_command() {
+  local project="$1" kind="$2" ref="$3" command
+  printf -v command 'dev -H %q' "$REMOTE"
+  if [ -n "$BOX" ]; then
+    printf -v command '%s -B %q' "$command" "$BOX"
+  fi
+  printf -v command '%s task run %q %q %q' "$command" "$project" "$kind" "$ref"
+  printf '%s\n' "$command"
+}
+
+task_plan() {
+  [ $# -ge 3 ] || die "usage: dev task plan OWNER/REPO pr|linear|prompt REF"
+  local project="$1" kind="$2" ref="$3" command
+  load_task_metadata "$project" "$kind" "$ref"
+  command=$(task_bootstrap_command "$project" "$kind" "$ref")
+  printf '%s' "$command" | clipboard_write
+  printf 'dev: copied task bootstrap for %s\n%s\n' "$TASK_TITLE" "$command"
+}
+
+task_wizard() {
+  need fzf
+  local project kind choice ref
+  project=$(pick_project) || return 1
+  choice=$(printf '%s\n' \
+             'pr      GitHub pull request' \
+             'linear  Linear issue' \
+             'prompt  free-form task prompt' |
+           fzf --prompt='task type> ' --reverse --height=30%) || return 1
+  kind="${choice%% *}"
+  case "$kind" in
+    pr)     printf 'PR number or URL: ' >&2 ;;
+    linear) printf 'Linear issue identifier: ' >&2 ;;
+    prompt) printf 'Task prompt: ' >&2 ;;
+  esac
+  read -r ref || return 1
+  [ -n "$ref" ] || return 1
+  task_plan "$project" "$kind" "$ref"
+}
+
+ensure_remote_repo() {
+  local project="$1" repo_name data path dest url qdest qurl vm integration
+  repo_name="${project##*/}"
+  data=$(scan 2>/dev/null || true)
+  path=$(printf '%s\n' "$data" |
+         awk -F'\t' -v repo="$repo_name" '$1 == repo && $5 == "main" { print $3; exit }')
+  if [ -n "$path" ]; then
+    printf '%s\n' "$path"
+    return 0
+  fi
+
+  dest="$RHOME/$repo_name"
+  url="https://github.int.exe.xyz/$project.git"
+  printf -v qdest '%q' "$dest"
+  printf -v qurl '%q' "$url"
+  if ! path=$(ssh_remote "
+    if [ -d $qdest/.git ]; then
+      printf '%s\n' $qdest
+    elif [ -e $qdest ]; then
+      printf 'destination exists but is not a git checkout: %s\n' $qdest >&2
+      exit 2
+    else
+      git clone $qurl $qdest >&2 || exit 3
+      printf '%s\n' $qdest
+    fi
+  "); then
+    vm="${BOX:-${PROXY_HOST%.exe.xyz}}"
+    if [ -n "$SSH_OVERRIDE_HOST" ]; then
+      integration=$(ssh "$REMOTE" integrations list 2>/dev/null |
+                    awk -v repo="repos=$project" 'index($0, repo) { print $1; exit }')
+      if [ -n "$integration" ]; then
+        die "could not clone $project. Attach its existing integration: ssh $REMOTE \"integrations attach $integration vm:$vm\""
+      fi
+      die "could not clone $project. Add its GitHub integration: ssh $REMOTE \"integrations add github --name=$repo_name --repository=$project --attach=vm:$vm\""
+    fi
+    die "could not clone $project. Use the matching exe.dev lobby profile to attach a GitHub integration for vm:$vm"
+  fi
+  printf '%s\n' "$path"
+}
+
+ensure_task_worktree() {
+  local repo="$1" repo_name branch_ref existing branch_exists base path slug
+  local qrepo qbranch qref qbase qpath json actual
+  repo_name="${repo##*/}"
+  branch_ref="refs/heads/$TASK_BRANCH"
+  printf -v qrepo '%q' "$repo"
+  printf -v qbranch '%q' "$TASK_BRANCH"
+  printf -v qref '%q' "$branch_ref"
+
+  existing=$(ssh_remote "git -C $qrepo worktree list --porcelain" |
+             awk -v wanted="$branch_ref" '
+               /^worktree / { path = substr($0, 10) }
+               /^branch / && substr($0, 8) == wanted { print path; exit }')
+  if [ -n "$existing" ]; then
+    printf '%s\0370\n' "$existing"
+    return 0
+  fi
+
+  if [ "$TASK_ID" = "pr-$TASK_NUMBER" ]; then
+    ssh_remote "git -C $qrepo show-ref --verify --quiet $qref ||
+      git -C $qrepo fetch origin pull/$TASK_NUMBER/head:$qref" ||
+      die "could not fetch PR #$TASK_NUMBER into $TASK_BRANCH"
+  fi
+
+  branch_exists=$(ssh_remote "git -C $qrepo show-ref --verify --quiet $qref && printf yes || true")
+  base="$TASK_BASE"
+  if [ -z "$base" ]; then
+    base=$(ssh_remote "git -C $qrepo symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null ||
+                       printf '%s\n' origin/main")
+  fi
+  slug=$(slugify "$TASK_BRANCH")
+  [ -n "$slug" ] || slug=$(slugify "$TASK_ID")
+  path="$WT_ROOT/$repo_name/$slug"
+  printf -v qpath '%q' "$path"
+
+  if [ -n "$branch_exists" ]; then
+    json=$(ssh_remote "$HERDR worktree create --cwd $qrepo --branch $qbranch --path $qpath --focus") ||
+      die "worktree create failed for $TASK_BRANCH"
+  else
+    printf -v qbase '%q' "$base"
+    json=$(ssh_remote "$HERDR worktree create --cwd $qrepo --branch $qbranch --base $qbase --path $qpath --focus") ||
+      die "worktree create failed for $TASK_BRANCH"
+  fi
+  actual=$(printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    result = json.load(sys.stdin).get("result", {})
+    print(result.get("worktree", {}).get("path") or result.get("path") or "")
+except Exception:
+    pass
+')
+  [ -n "$actual" ] || actual="$path"
+  printf '%s\0371\n' "$actual"
+}
+
+launch_task_workspace() {
+  local path="$1" created="$2" qpath opened fields workspace pane agent already
+  local name qname qpane qprompt qsession
+  printf -v qpath '%q' "$path"
+  printf -v qsession '%q' "$SESSION"
+  opened=$(ssh_remote "$HERDR --session $qsession worktree open --path $qpath --focus") ||
+    die "could not open task workspace $path"
+  fields=$(printf '%s' "$opened" | python3 -c '
+import json, sys
+try:
+    r = json.load(sys.stdin).get("result", {})
+    root = r.get("root_pane") or {}
+    fields = [r.get("workspace_id") or (r.get("workspace") or {}).get("workspace_id") or "",
+              root.get("pane_id") or "", root.get("agent") or "",
+              "1" if r.get("already_open") else "0"]
+    print("\x1f".join(fields))
+except Exception:
+    pass
+')
+  IFS=$'\037' read -r workspace pane agent already <<< "$fields"
+  [ -n "$workspace" ] || die "herdr did not return a workspace for $path"
+
+  if [ -z "$agent" ] || [ "$created" = 1 ] || [ "$already" != 1 ]; then
+    [ -n "$pane" ] || die "herdr did not return a root pane for $path"
+    name=$(slugify "$TASK_ID")
+    [ -n "$name" ] || name="task"
+    printf -v qname '%q' "$name"
+    printf -v qpane '%q' "$pane"
+    printf -v qprompt '%q' "$TASK_PROMPT"
+    case "$agent" in
+      "")
+        ssh_remote "$HERDR --session $qsession agent start $qname --kind omp --pane $qpane -- $qprompt" ||
+          die "could not start OMP in $path"
+        ;;
+      omp)
+        ssh_remote "$HERDR --session $qsession agent prompt $qpane $qprompt" ||
+          die "could not prompt OMP in $path"
+        ;;
+      *)
+        printf 'dev: workspace already has %s; attaching without replacing it\n' "$agent" >&2
+        ;;
+    esac
+  fi
+  remote_tty "$HERDR --session $qsession"
+}
+
+task_run() {
+  [ $# -ge 3 ] || die "usage: dev task run OWNER/REPO pr|linear|prompt REF"
+  local project="$1" kind="$2" ref="$3" repo result path created
+  load_task_metadata "$project" "$kind" "$ref"
+  printf 'dev: preparing %s — %s\n' "$TASK_ID" "$TASK_TITLE"
+  repo=$(ensure_remote_repo "$project") || return 1
+  result=$(ensure_task_worktree "$repo") || return 1
+  path="${result%%$'\037'*}"
+  created="${result#*$'\037'}"
+  launch_task_workspace "$path" "$created"
+}
+
+cmd_task() {
+  case "${1:-}" in
+    run)  shift; task_run "$@" ;;
+    plan) shift; task_plan "$@" ;;
+    "")   task_wizard ;;
+    *)    task_plan "$@" ;;
+  esac
+}
+
 # --- action menu -----------------------------------------------------------
 # Returns 1 when the user backs out, so the caller can redraw the list.
 action_menu() {
@@ -493,6 +856,7 @@ action_menu() {
   [ -n "$ports" ] && srv="$ports"
   out=$(printf '%s\n' \
     "copy     copy herdr login command" \
+    "task     create a task worktree and OMP bootstrap" \
     "herdr    attach the herdr session here" \
     "session  attach here in another herdr session" \
     "code     open in VS Code (Remote-SSH)" \
@@ -510,6 +874,7 @@ action_menu() {
 
   case "${choice%% *}" in
     copy)    copy_herdr_command "$path" ;;
+    task)    cmd_task ;;
     herdr)   open_herdr "$path" ;;
     session) local sess; sess=$(pick_session) || return 0; open_herdr "$path" "$sess" ;;
     code)    open_code "$path" ;;
@@ -550,9 +915,9 @@ pick() {
 
   out=$(fmt < "$CACHE" |
         fzf --ansi --reverse --height=100% --prompt='workspace> ' --query="${1:-}" \
-            --header='↑↓ move   enter copy login   → menu   ctrl-o code   ctrl-h herdr   ctrl-s session   ctrl-p preview   ctrl-e env   ctrl-r refresh' \
+            --header='↑↓ move   enter copy login   → menu   ctrl-n task   ctrl-o code   ctrl-h herdr   ctrl-s session   ctrl-p preview   ctrl-e env   ctrl-r refresh' \
             --preview="$0 _pane {-1}" --preview-window='right,52%,border-left,wrap' \
-            --expect=right,ctrl-o,ctrl-h,ctrl-s,ctrl-p,ctrl-e,ctrl-r) || return 1
+            --expect=right,ctrl-n,ctrl-o,ctrl-h,ctrl-s,ctrl-p,ctrl-e,ctrl-r) || return 1
 
   key=$(printf '%s\n' "$out" | sed -n 1p)
   line=$(printf '%s\n' "$out" | sed -n 2p)
@@ -581,6 +946,7 @@ browse() {
     case "$REPLY_KEY" in
       "")      copy_herdr_command "$REPLY_PATH" ;;
       right)   action_menu "$REPLY_PATH" "$REPLY_PORTS" || continue ;;
+      ctrl-n)  cmd_task || true ;;
       ctrl-r)  refresh_cache; continue ;;
       ctrl-o)  open_code    "$REPLY_PATH" ;;
       ctrl-h)  open_herdr   "$REPLY_PATH" ;;   # attaches, then exits
@@ -849,7 +1215,7 @@ main() {
   done
   case "${1:-}" in
     -h|--help)
-      sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
       return
       ;;
   esac
@@ -866,6 +1232,7 @@ main() {
     rm|remove) shift; refresh_cache; resolve "${1:-}" && rm_worktree "$REPLY_PATH" ;;
     code)      shift; refresh_cache; resolve "${1:-}" && open_code "$REPLY_PATH" ;;
     copy|cp)  shift; refresh_cache; resolve "${1:-}" && copy_herdr_command "$REPLY_PATH" ;;
+    task|work) shift; cmd_task "$@" ;;
     herdr|h)   shift
                sess=""
                case "${1:-}" in

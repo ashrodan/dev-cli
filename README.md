@@ -24,6 +24,7 @@ dev                     browse worktrees with a live preview pane
                           ctrl-o     VS Code      ctrl-h  herdr
                           ctrl-s     herdr, in a chosen or new session
                           ctrl-p     preview      ctrl-e  env push
+                          ctrl-n     new task workspace
                           ctrl-r     refresh
 dev ls                  list every worktree, with any servers it is running
 dev ps                  every listening server on the box, with preview URLs
@@ -32,6 +33,7 @@ dev new [repo] <branch> [--base ref]
 dev code  [query]       open in VS Code, skipping the picker on a unique match
 dev herdr [query]       attach herdr, same matching
 dev copy [query]        copy login command without attaching
+dev task               select a project and prepare a task workspace
 dev herdr -S [query]    pick the session first
 dev herdr -s NAME       attach in a named session, created if it does not exist
 dev sessions            list herdr sessions on the box
@@ -65,6 +67,34 @@ the cache refreshes automatically after any action that could change state.
 Pressing `enter` copies the command and returns to the workspace list, keeping
 `dev` open as a live view of the box. The action menu also loops: backing out
 with `←` or finishing a non-terminal action returns to the workspace list.
+
+## Task workspaces
+
+Press `ctrl-n` in the workspace browser, choose a canonical GitHub project from
+`~/dev`, then choose a GitHub PR, Linear issue, or free-form prompt. The wizard
+loads the task metadata and copies a bootstrap command while the browser stays
+open:
+
+```sh
+dev -H exe-dash -B ar-general-dev task run dashlytix/dash-ai-agent linear DAS-271
+```
+
+Paste that command into a new terminal. It:
+
+1. Checks the selected box for the repository.
+2. If missing, clones through the existing `github.int.exe.xyz` integration.
+3. Reuses a worktree already on the task branch, or creates and opens one.
+4. Starts OMP with the PR body, Linear issue description, or prompt.
+5. Focuses the herdr workspace and attaches the new terminal.
+
+PRs use their head branch and fetch `pull/<number>/head` when needed. A Linear
+issue reuses the branch from a linked PR in the selected project, falling back
+to Linear's suggested branch name. Free-form prompts use a dated `work/<slug>`
+branch. If the GitHub integration is missing, `dev` stops without changing
+account configuration and prints the exact attach or add command.
+
+The standalone entry point is `dev -P task`. Scripts can bypass the wizard with
+`dev task plan OWNER/REPO pr|linear|prompt REF`.
 
 ## Sessions
 
@@ -215,7 +245,8 @@ a live subscription — re-import when the fleet changes.
 ## Requirements
 
 Local: `bash`, `fzf`, `python3`, `ssh`, and the `code` CLI for the VS Code path.
-Remote: `herdr` on `PATH`, `git`, `python3`.
+Task workspaces additionally use `gh` for PRs and `linear` for Linear issues.
+Remote: `herdr`, `omp`, `git`, and `python3`.
 
 An SSH host alias for the box — the default is `dai`. Put each box's key on its
 own alias; `dev -H work-box` uses the same `HostName`, `User`, `IdentityFile`,
@@ -254,6 +285,7 @@ same key (for example `Host box-name`); `dev` uses that alias when available.
 |---|---|---|
 | `DEV_REMOTE` | `dai` | SSH host or exe.dev lobby alias |
 | `DEV_BOX` | unset | Box name when `DEV_REMOTE` is an exe.dev lobby alias |
+| `DEV_PROJECT_ROOT` | `$HOME/dev` | Local canonical GitHub projects shown by `dev task` |
 | `DEV_REMOTE_HOME` | `/home/exedev` | Remote home, where repos are searched |
 | `DEV_WT_ROOT` | `$DEV_REMOTE_HOME/worktrees` | Where new worktrees are created |
 | `DEV_SESSION` | `default` | herdr session to attach |
