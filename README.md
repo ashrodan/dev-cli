@@ -62,9 +62,9 @@ worktree is serving. It renders from the cached scan rather than hitting the box
 per keystroke, so arrowing through the list is instant. `ctrl-r` re-scans, and
 the cache refreshes automatically after any action that could change state.
 
-Pressing `enter` copies the command and exits. The action menu still loops:
-backing out with `←` returns to the workspace list, and finishing a non-terminal
-action returns there too.
+Pressing `enter` copies the command and returns to the workspace list, keeping
+`dev` open as a live view of the box. The action menu also loops: backing out
+with `←` or finishing a non-terminal action returns to the workspace list.
 
 ## Sessions
 

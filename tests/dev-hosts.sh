@@ -6,6 +6,7 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/dev-hosts-test.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
 LOG="$TMP/calls"
 CLIPBOARD="$TMP/clipboard"
+FZF_STATE="$TMP/fzf-state"
 mkdir -p "$TMP/bin" "$TMP/ssh/config.d"
 
 cat > "$TMP/ssh/config" <<'SSH'
@@ -70,6 +71,10 @@ cat > "$TMP/bin/fzf" <<'SH'
 printf 'fzf %s\n' "$*" >> "$DEV_TEST_LOG"
 case "$*" in
   *"workspace> "*)
+    if [ -e "$DEV_TEST_FZF_STATE" ]; then
+      exit 1
+    fi
+    : > "$DEV_TEST_FZF_STATE"
     IFS= read -r line || exit 1
     printf '\n%s\n' "$line"
     exit 0
@@ -106,7 +111,7 @@ assert_contains() {
 run_dev() {
   PATH="$TMP/bin:$PATH" DEV_TEST_LOG="$LOG" DEV_TEST_MULTI="${DEV_TEST_MULTI:-}" \
     DEV_TEST_PICK="${DEV_TEST_PICK:-}" DEV_TEST_CLIPBOARD="$CLIPBOARD" \
-    DEV_SSH_CONFIG="$TMP/ssh/config" "$ROOT/dev" "$@"
+    DEV_TEST_FZF_STATE="$FZF_STATE" DEV_SSH_CONFIG="$TMP/ssh/config" "$ROOT/dev" "$@"
 }
 
 : > "$LOG"
@@ -145,11 +150,16 @@ assert_contains "$copy_output" "dev: copied"
   fail "unexpected copied command: $copied_command"
 
 : > "$CLIPBOARD"
+: > "$LOG"
+rm -f "$FZF_STATE"
 browse_output=$(run_dev -H exe-dash)
 browse_command=$(<"$CLIPBOARD")
+workspace_pickers=$(grep -c 'fzf .*workspace> ' "$LOG" || true)
 assert_contains "$browse_output" "dev: copied"
 [ "$browse_command" = "$copied_command" ] ||
   fail "Enter should copy the same login command"
+[ "$workspace_pickers" -eq 2 ] ||
+  fail "workspace picker should reopen after copying"
 
 : > "$LOG"
 profile_ps=$(run_dev -H exe-dash ps)

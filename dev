@@ -579,7 +579,7 @@ browse() {
     resolve "${1:-}" || return 0
     set --                                   # query applies to the first pass only
     case "$REPLY_KEY" in
-      "")      copy_herdr_command "$REPLY_PATH"; return 0 ;;
+      "")      copy_herdr_command "$REPLY_PATH" ;;
       right)   action_menu "$REPLY_PATH" "$REPLY_PORTS" || continue ;;
       ctrl-r)  refresh_cache; continue ;;
       ctrl-o)  open_code    "$REPLY_PATH" ;;
