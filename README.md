@@ -12,6 +12,8 @@ happens to hold the primary branch.
 ## Usage
 
 ```
+dev -P [command]        interactively pick an exe.dev SSH profile
+dev --profile [command] long form of `-P`
 dev -H HOST [command]   use another SSH config alias and its configured key
 dev -H PROFILE -B BOX  select an exe.dev box through an account/lobby alias
 dev                     browse worktrees with a live preview pane
@@ -223,6 +225,11 @@ An exe.dev lobby alias such as `exe-dash` can also be passed directly. `dev`
 lists that account's running boxes and keeps the alias's identity while
 connecting. A single box is selected automatically; select among several with
 `dev -H exe-dash -B box-name`.
+
+`dev -P` reads exact `Host` aliases from `~/.ssh/config` and its `Include`
+files, keeps aliases whose resolved hostname is `exe.dev`, and shows their
+identity keys in an interactive picker. The selected profile then uses the same
+box selection above. `dev -H` with no host opens the same picker.
 
 VS Code Remote-SSH cannot inherit a one-off `HostName` override. For `dev code`
 through a lobby profile, give the box name its own SSH config alias with the

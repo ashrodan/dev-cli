@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # dev — worktree-first navigator for the herdr dev box.
 #
-#   dev [-H host] [-B box] [command...]
-#                    use an SSH host alias; select a box for lobby aliases
+#   dev -P|--profile [command...]       pick an exe.dev SSH profile
+#   dev [-H host] [-B box] [command...] use a host; select a box for profiles
 #   dev              browse worktrees
 #                      ↑ ↓     move, preview updates live
 #                      → enter open the action menu
@@ -114,6 +114,83 @@ ssh_remote() {
   else
     ssh "${tty[@]}" "$REMOTE" "$@"
   fi
+}
+
+ssh_config_aliases() {
+  python3 -c '
+import glob
+import os
+import shlex
+import sys
+
+root = os.path.abspath(os.path.expanduser(sys.argv[1]))
+base = os.path.dirname(root)
+seen_files = set()
+seen_aliases = set()
+aliases = []
+
+def visit(pattern):
+    expanded = os.path.expanduser(pattern)
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(base, expanded)
+    for path in sorted(glob.glob(expanded)):
+        path = os.path.realpath(path)
+        if path in seen_files or not os.path.isfile(path):
+            continue
+        seen_files.add(path)
+        try:
+            lines = open(path, errors="replace")
+        except OSError:
+            continue
+        with lines:
+            for raw in lines:
+                try:
+                    fields = shlex.split(raw, comments=True)
+                except ValueError:
+                    continue
+                if not fields:
+                    continue
+                keyword = fields[0].lower()
+                if keyword == "include":
+                    for include in fields[1:]:
+                        visit(include)
+                elif keyword == "host":
+                    for alias in fields[1:]:
+                        if (alias.startswith("!") or
+                                any(char in alias for char in "*?!")):
+                            continue
+                        if alias not in seen_aliases:
+                            seen_aliases.add(alias)
+                            aliases.append(alias)
+
+visit(root)
+print("\n".join(aliases))
+' "${DEV_SSH_CONFIG:-$HOME/.ssh/config}"
+}
+
+list_ssh_profiles() {
+  local alias config hostname identity
+  ssh_config_aliases | while IFS= read -r alias; do
+    [ -n "$alias" ] || continue
+    config=$(ssh -G "$alias" 2>/dev/null) || continue
+    hostname=$(printf '%s\n' "$config" |
+               awk '$1 == "hostname" { print $2; exit }')
+    [ "$hostname" = "exe.dev" ] || continue
+    identity=$(printf '%s\n' "$config" |
+               awk '$1 == "identityfile" { print $2; exit }')
+    printf '%s\t%s\n' "$alias" "${identity:--}"
+  done
+}
+
+pick_ssh_profile() {
+  need fzf
+  local profiles choice
+  profiles=$(list_ssh_profiles)
+  [ -n "$profiles" ] || die "no exe.dev SSH profiles found in ${DEV_SSH_CONFIG:-$HOME/.ssh/config}"
+  choice=$(printf '%s\n' "$profiles" |
+           fzf --prompt='profile> ' --reverse --height=30% --delimiter=$'\t' \
+               --with-nth=1,2 --header='SSH profile    identity key') || return 1
+  printf '%s' "$choice" | cut -f1
 }
 
 # --- remote scan -----------------------------------------------------------
@@ -701,13 +778,21 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       -H|--host|-r|--remote)
-        [ $# -ge 2 ] || die "missing SSH host after $1"
-        REMOTE="$2"
-        shift 2
+        if [ $# -ge 2 ]; then
+          REMOTE="$2"
+          shift 2
+        else
+          REMOTE=$(pick_ssh_profile) || return 0
+          shift
+        fi
         ;;
       --host=*|--remote=*)
         REMOTE="${1#*=}"
         [ -n "$REMOTE" ] || die "SSH host cannot be empty"
+        shift
+        ;;
+      -P|--profile|--pick-profile)
+        REMOTE=$(pick_ssh_profile) || return 0
         shift
         ;;
       -B|--box)
@@ -731,7 +816,7 @@ main() {
   done
   case "${1:-}" in
     -h|--help)
-      sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
       return
       ;;
   esac
