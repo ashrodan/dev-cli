@@ -81,10 +81,15 @@ repacked when the terminal is resized — a narrow pane gets more rows rather th
 truncated hints.
 
 Every menu the browser opens — `→` actions, `ctrl-s` sessions, `ctrl-p` ports,
-`ctrl-n` projects, `ctrl-e` env vars — opens as a labelled panel in the
-bottom-right corner, under where the preview pane was, with its own hint along
-the bottom. One position for all of them, so the eye does not have to hunt for
-the menu that just appeared.
+`ctrl-n` projects, `ctrl-e` env vars — appears as a labelled panel over the
+bottom-right of the list, with its own hint along the bottom. The list, its
+status line and its shortcuts stay on screen behind the panel, and backing out
+with `←` or `esc` puts the cursor back on the worktree you were on.
+
+The browser draws on the alternate screen for this, so quitting hands the
+terminal back exactly as it was found, scrollback and all. Anything that writes
+to the terminal — a copied command, a confirmation prompt, an attach — clears
+the frame first rather than printing on top of the list.
 
 Pressing `enter` copies the command and returns to the workspace list, keeping
 `dev` open as a live view of the box. The action menu also loops: backing out

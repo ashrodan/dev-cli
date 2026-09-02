@@ -47,6 +47,7 @@ TS_HOST="${DEV_TS_HOST:-}"
 PROXY_PORT="${DEV_PROXY_PORT:-8000}"
 REFRESH_SECS="${DEV_REFRESH_SECS:-30}"
 FZF_FOOTER=""
+SCREEN=""
 
 die()  { printf 'dev: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
@@ -342,21 +343,46 @@ term_size() {
   esac
 }
 
-# Every menu the browser opens appears in the same place — the bottom-right
-# corner, under where the preview pane was — instead of wherever the cursor
-# happened to be when the list closed. One shape and one hint style for all of
-# them: `panel LABEL [key caption]...` fills in the fzf arguments.
+# The browser draws on the alternate screen, so a menu can be laid over the list
+# as a modal and quitting hands the shell back exactly as it was found. Anything
+# that writes to the terminal wipes the frame first rather than printing on top
+# of it. Outside the browser every one of these is a no-op.
+screen_enter() {
+  [ -t 1 ] || return 0
+  SCREEN=1
+  screen_write '\033[?1049h\033[H'
+}
+screen_leave() { [ -n "$SCREEN" ] || return 0; SCREEN=""; screen_write '\033[?1049l'; }
+screen_wipe()  { [ -n "$SCREEN" ] || return 0; screen_write '\033[H\033[2J'; }
+screen_home()  { [ -n "$SCREEN" ] || return 0; screen_write '\033[H'; }
+# pick() and the pickers run inside $( ), where stdout is a pipe, so escapes have
+# to go to the terminal explicitly.
+screen_write() { printf "$1" >/dev/tty 2>/dev/null || true; }
+
+# Every menu the browser opens appears in the same place — a panel over the
+# bottom-right of the list, under where the preview pane was — so the list it
+# belongs to stays on screen behind it. `panel LABEL [key caption]...` fills in
+# the fzf arguments. Away from the browser there is no frame to lay it over, so
+# the picker stays inline.
 CORNER=()
 corner_window() {
   local size rows cols height top left
+  if [ -z "$SCREEN" ]; then
+    CORNER=(--height=~55% --border=rounded --border-label=" $1 " --border-label-pos=3)
+    return 0
+  fi
   size=$(term_size); rows="${size%% *}"; cols="${size#* }"
   height=18
-  [ "$height" -gt $(( rows - 2 )) ] && height=$(( rows - 2 ))
+  [ "$height" -gt "$rows" ] && height="$rows"
   [ "$height" -lt 6 ] && height=6
-  top=$(( rows - height )); [ "$top" -lt 0 ] && top=0
+  top=$(( rows - height + 1 )); [ "$top" -lt 1 ] && top=1
   left=$(( cols * 48 / 100 )); [ "$left" -lt 0 ] && left=0
-  CORNER=(--height=100% "--margin=$top,0,0,$left" --border=rounded
-          --border-label=" $1 " --border-label-pos=3)
+  # Height mode draws from the cursor down, so park the cursor on the row the
+  # panel should start at. --no-clear leaves the panel up until the list paints
+  # over it, which is what makes backing out of a menu flicker-free.
+  screen_write "\\033[${top};1H"
+  CORNER=(--height="$height" "--margin=0,0,0,$left" --no-clear
+          --border=rounded --border-label=" $1 " --border-label-pos=3)
 }
 
 panel() {
@@ -435,6 +461,7 @@ cmd_pane() {
 # --- actions ---------------------------------------------------------------
 open_code() {
   need code
+  screen_wipe
   local code_remote="$REMOTE" candidate
   if [ -n "$SSH_OVERRIDE_HOST" ]; then
     candidate=$(ssh -G "$BOX" 2>/dev/null |
@@ -473,6 +500,7 @@ herdr_login_command() {
 
 copy_herdr_command() {
   local command
+  screen_wipe
   command=$(herdr_login_command "$1" "${2:-$SESSION}")
   printf '%s' "$command" | clipboard_write
   printf 'dev: copied %s\n' "$command"
@@ -490,6 +518,7 @@ pr_handoff_command() {
 
 open_pull_request() {
   need gh
+  screen_wipe
   local path="$1" qpath metadata remote_url branch project url base title body range qrange
   printf -v qpath '%q' "$path"
   metadata=$(ssh_remote "git -C $qpath remote get-url origin &&
@@ -624,6 +653,7 @@ term_restore() {
 # Run an interactive remote command and exit, restoring the terminal either way.
 # Replaces a bare `exec ssh`, which leaves no opportunity to clean up.
 remote_tty() {
+  screen_wipe
   ssh_remote -t "$1"
   local rc=$?
   term_restore
@@ -648,6 +678,7 @@ open_shell() { remote_tty "cd '$1' && exec \$SHELL -l"; }
 open_preview() {
   local path="$1" ports="$2" choice port url
   if [ -z "$ports" ]; then
+    screen_wipe
     printf 'dev: nothing listening in %s\n' "$path" >&2
     printf '     start a server there, and bind 0.0.0.0 not 127.0.0.1\n' >&2
     return 1
@@ -662,6 +693,7 @@ open_preview() {
   else
     port="$ports"
   fi
+  screen_wipe
   if [ "${port: -1}" = l ]; then
     printf 'dev: port %s is bound to 127.0.0.1 on the box, so the proxy cannot see it.\n' "${port%l}" >&2
     printf '     restart it with --host 0.0.0.0\n' >&2
@@ -928,6 +960,7 @@ task_bootstrap_command() {
 task_plan() {
   [ $# -ge 3 ] || die "usage: dev task plan OWNER/REPO pr|linear|prompt REF"
   local project="$1" kind="$2" ref="$3" command
+  screen_wipe
   load_task_metadata "$project" "$kind" "$ref"
   command=$(task_bootstrap_command "$project" "$kind" "$ref")
   printf '%s' "$command" | clipboard_write
@@ -945,6 +978,7 @@ task_wizard() {
              'prompt  free-form task prompt' |
            fzf --prompt='task type> ' --reverse "${CORNER[@]}") || return 1
   kind="${choice%% *}"
+  screen_wipe
   case "$kind" in
     pr)     printf 'PR number or URL: ' >&2 ;;
     linear) printf 'Linear issue identifier or URL: ' >&2 ;;
@@ -1205,7 +1239,7 @@ action_menu() {
 # global is discarded. It therefore *prints* its result and resolve() unpacks it
 # in the calling shell. This is what previously broke every non-default key.
 CACHE=""
-cleanup() { [ -n "$CACHE" ] && rm -f "$CACHE" "$CACHE".*; }
+cleanup() { screen_leave; [ -n "$CACHE" ] && rm -f "$CACHE" "$CACHE".*; }
 trap cleanup EXIT
 
 # The preview pane and the periodic reload both read the cache while a scan may
@@ -1263,6 +1297,20 @@ cmd_status() {
   fi
 }
 
+# Internal: puts the cursor back on the worktree the last menu acted on, once.
+# The list is relaunched from scratch each time round the loop, so without this
+# every trip through a menu would drop you back at the top.
+cmd_focus() {
+  local cache="${DEV_CACHE:-}" want row
+  [ -n "$cache" ] && [ -f "$cache.focus" ] || return 0
+  want=$(cat "$cache.focus" 2>/dev/null || true)
+  rm -f "$cache.focus"
+  [ -n "$want" ] || return 0
+  row=$(awk -F'\t' -v p="$want" '$3 == p { print NR; exit }' "$cache")
+  [ -n "$row" ] && printf 'pos(%s)' "$row"
+  return 0
+}
+
 pick() {
   need fzf
   local out key line path ports self tick keys cols
@@ -1283,10 +1331,10 @@ pick() {
     chrome=(--footer="$keys" --footer-border=line --info=inline-right
             --header="$(cmd_status)"
             --bind "resize:transform-footer($self _keys)")
-    tick="transform-header($self _status)+refresh-preview"
+    tick="transform($self _focus)+transform-header($self _status)+refresh-preview"
   else
     chrome=(--header="$keys")
-    tick="refresh-preview"
+    tick="transform($self _focus)+refresh-preview"
   fi
   # `load` fires whenever a list finishes loading, so a reload scheduled there
   # re-arms itself: one sleeping child, no background poller, and fzf kills it
@@ -1294,6 +1342,11 @@ pick() {
   [ "$REFRESH_SECS" -gt 0 ] 2>/dev/null &&
     tick="$tick+reload-sync(sleep $REFRESH_SECS; $self _scan)"
 
+  # --no-clear leaves the frame up when fzf exits, so the menu that follows lands
+  # on top of the list instead of on a blank screen. screen_home keeps fzf from
+  # scrolling the frame away when it paints again.
+  [ -n "$SCREEN" ] && chrome+=(--no-clear)
+  screen_home
   out=$(fmt < "$CACHE" |
         fzf --ansi --reverse --height=100% --prompt='workspace> ' --query="${1:-}" \
             "${chrome[@]}" \
@@ -1322,9 +1375,11 @@ resolve() {
 browse() {
   local sess
   refresh_cache
+  screen_enter
   while true; do
-    resolve "${1:-}" || return 0
+    resolve "${1:-}" || break
     set --                                   # query applies to the first pass only
+    printf '%s' "$REPLY_PATH" > "$CACHE.focus"
     case "$REPLY_KEY" in
       "")      copy_herdr_command "$REPLY_PATH" ;;
       right)   action_menu "$REPLY_PATH" "$REPLY_PORTS" || continue ;;
@@ -1335,8 +1390,11 @@ browse() {
       ctrl-p)  open_preview "$REPLY_PATH" "$REPLY_PORTS" || true ;;
       ctrl-e)  cmd_env push -p "$REPLY_PATH" ;;
     esac
+    screen_enter                             # a remote TUI may have left it
     refresh_cache                            # state may have changed
   done
+  screen_leave
+  return 0
 }
 
 # --- subcommands -----------------------------------------------------------
@@ -1397,6 +1455,7 @@ cmd_new() {
 
 rm_worktree() {
   local path="$1" ws
+  screen_wipe
   ws=$(awk -F'\t' -v p="$path" '$3==p{print $4}' "$CACHE")
   printf 'Remove worktree %s? [y/N] ' "$path"
   read -r ans; [ "$ans" = y ] || [ "$ans" = Y ] || { echo "aborted"; return 1; }
@@ -1505,6 +1564,7 @@ cmd_env() {
              fzf --multi --prompt='vars to copy> ' --reverse "${CORNER[@]}" \
                  --header="$from  →  $REMOTE:$target/.env    tab = select, enter = push" |
              awk '{print $1}') || return 1
+      screen_wipe
       [ -z "$keys" ] && { echo "nothing selected"; return 0; }
 
       local n; n=$(printf '%s\n' "$keys" | grep -c .)
@@ -1596,8 +1656,9 @@ main() {
         ;;
     esac
   done
-  # The footer and the status line are pure layout, so they answer before
-  # configure_remote spends an `ssh -G` on them; a resize must stay cheap.
+  # The footer, the status line and the cursor restore are pure layout, so they
+  # answer before configure_remote spends an `ssh -G` on them: these run on every
+  # refresh and on every resize, and have to stay cheap.
   case "${1:-}" in
     -h|--help)
       awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0"
@@ -1605,6 +1666,7 @@ main() {
       ;;
     _keys)   cmd_keys; return ;;
     _status) cmd_status; return ;;
+    _focus)  cmd_focus; return ;;
   esac
 
   configure_remote

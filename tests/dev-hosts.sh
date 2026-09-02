@@ -350,7 +350,8 @@ assert_contains "$browse_output" "dev: copied"
 rm -f "$FZF_STATE"
 DEV_REFRESH_SECS=45 run_dev -H exe-dash >/dev/null
 refresh_calls=$(plain "$(<"$LOG")")
-assert_contains "$refresh_calls" "--bind load:transform-header("
+assert_contains "$refresh_calls" "--bind load:transform("
+assert_contains "$refresh_calls" "_focus)+transform-header("
 assert_contains "$refresh_calls" "_status)+refresh-preview+reload-sync(sleep 45; "
 assert_contains "$refresh_calls" "--bind ctrl-r:reload-sync("
 assert_contains "$refresh_calls" "--footer-border=line"
@@ -358,8 +359,10 @@ assert_contains "$refresh_calls" "ctrl-r refresh"
 assert_contains "$refresh_calls" "--bind resize:transform-footer("
 assert_not_contains "$refresh_calls" "ctrl-e,ctrl-r"
 
-# Pressing right opens the action menu, anchored to the bottom-right corner so
-# every menu the browser opens appears in the same place.
+# Pressing right opens the action menu, labelled and with its own hint. Its modal
+# placement needs a terminal to lay the panel over, so with no tty here it stays
+# an inline picker — and must not leave a frame behind, which is what --no-clear
+# would do to a script's terminal.
 : > "$LOG"
 : > "$CLIPBOARD"
 rm -f "$FZF_STATE"
@@ -369,10 +372,9 @@ assert_contains "$menu_output" "dev: copied"
 assert_contains "$menu_calls" "fzf --prompt=action> "
 assert_contains "$menu_calls" "--border-label= actions "
 assert_contains "$menu_calls" "enter run   ←/esc back"
-action_margin=$(printf '%s\n' "$menu_calls" | sed -n 's/.*--margin=\([0-9]*,[0-9]*,[0-9]*,[0-9]*\).*/\1/p' | sed -n 1p)
-[ -n "$action_margin" ] || fail "the action menu should be placed with a margin"
-[ "${action_margin##*,}" -gt 0 ] || fail "the action menu should sit in the right half: $action_margin"
-[ "${action_margin%%,*}" -gt 0 ] || fail "the action menu should sit at the bottom: $action_margin"
+assert_contains "$menu_calls" "--height=~55%"
+assert_not_contains "$menu_calls" "--no-clear"
+assert_not_contains "$menu_calls" "--margin="
 
 : > "$LOG"
 rm -f "$FZF_STATE"
