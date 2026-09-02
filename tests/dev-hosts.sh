@@ -42,6 +42,11 @@ cat > "$TMP/bin/ssh" <<'SH'
 set -eu
 printf 'ssh %s\n' "$*" >> "$DEV_TEST_LOG"
 
+if [ -n "${DEV_TEST_SSH_FAIL:-}" ] && [ "${1:-}" != "-G" ]; then
+  printf 'ssh: connect to host failed\n' >&2
+  exit 255
+fi
+
 if [ "${1:-}" = "-G" ]; then
   case "${2:-}" in
     exe-dash|exe-personal) printf 'hostname exe.dev\nuser exedev\nidentityfile ~/.ssh/%s\n' "${2#exe-}" ;;
@@ -156,6 +161,10 @@ cat > "$TMP/bin/fzf" <<'SH'
 #!/usr/bin/env bash
 printf 'fzf %s\n' "$*" >> "$DEV_TEST_LOG"
 case "$*" in
+  *--version*)
+    printf '0.65.2 (stub)\n'
+    exit 0
+    ;;
   *"project all> "*)
     while IFS= read -r line; do
       printf 'project-all-row %s\n' "$line" >> "$DEV_TEST_LOG"
@@ -262,6 +271,9 @@ assert_not_contains() {
   esac
 }
 
+# The logged fzf arguments carry the footer's bold/dim attributes.
+plain() { printf '%s' "$1" | sed $'s/\033\\[[0-9;]*m//g'; }
+
 run_dev() {
   PATH="$TMP/bin:$PATH" DEV_TEST_LOG="$LOG" DEV_TEST_MULTI="${DEV_TEST_MULTI:-}" \
     DEV_TEST_PICK="${DEV_TEST_PICK:-}" DEV_TEST_PROJECT="${DEV_TEST_PROJECT:-}" \
@@ -272,6 +284,7 @@ run_dev() {
     DEV_TEST_CROSS_REPO_WORKTREE="${DEV_TEST_CROSS_REPO_WORKTREE:-}" \
     DEV_TEST_PR_BRANCH="${DEV_TEST_PR_BRANCH:-}" DEV_TEST_EXISTING_PR="${DEV_TEST_EXISTING_PR:-}" \
     DEV_TEST_EXISTING_WORKTREE="${DEV_TEST_EXISTING_WORKTREE:-}" \
+    DEV_TEST_SSH_FAIL="${DEV_TEST_SSH_FAIL:-}" DEV_REFRESH_SECS="${DEV_REFRESH_SECS:-}" \
     DEV_TEST_CLIPBOARD="$CLIPBOARD" DEV_TEST_FZF_STATE="$FZF_STATE" \
     DEV_SSH_CONFIG="$TMP/ssh/config" DEV_PROJECT_ROOT="$TMP/projects" "$ROOT/dev" "$@"
 }
@@ -322,6 +335,51 @@ assert_contains "$browse_output" "dev: copied"
   fail "Enter should copy the same login command"
 [ "$workspace_pickers" -eq 2 ] ||
   fail "workspace picker should reopen after copying"
+
+# The workspace list re-scans on a timer and on ctrl-r, both without leaving fzf.
+: > "$LOG"
+rm -f "$FZF_STATE"
+DEV_REFRESH_SECS=45 run_dev -H exe-dash >/dev/null
+refresh_calls=$(plain "$(<"$LOG")")
+assert_contains "$refresh_calls" "--bind load:transform-header("
+assert_contains "$refresh_calls" "_status)+refresh-preview+reload-sync(sleep 45; "
+assert_contains "$refresh_calls" "--bind ctrl-r:reload-sync("
+assert_contains "$refresh_calls" "--footer-border=line"
+assert_contains "$refresh_calls" "ctrl-r refresh"
+assert_not_contains "$refresh_calls" "ctrl-e,ctrl-r"
+
+: > "$LOG"
+rm -f "$FZF_STATE"
+DEV_REFRESH_SECS=0 run_dev -H exe-dash >/dev/null
+manual_calls=$(plain "$(<"$LOG")")
+assert_not_contains "$manual_calls" "reload-sync(sleep"
+assert_contains "$manual_calls" "--bind ctrl-r:reload-sync("
+
+# A scan replaces the cache; one that cannot reach the box keeps the last list.
+CACHE_FIXTURE="$TMP/scan-cache"
+printf 'stale\tmain\t/home/exedev/stale\t\tmain\t\t\t\t0\t0\t0\tstale row\n' > "$CACHE_FIXTURE"
+scan_output=$(DEV_CACHE="$CACHE_FIXTURE" run_dev -H exe-dash _scan)
+assert_contains "$scan_output" "/home/exedev/sample"
+assert_not_contains "$scan_output" "/home/exedev/stale"
+[ -s "$CACHE_FIXTURE.at" ] || fail "_scan should record when it last scanned"
+[ ! -e "$CACHE_FIXTURE.err" ] || fail "_scan should clear the unreachable marker"
+
+status_output=$(plain "$(DEV_CACHE="$CACHE_FIXTURE" run_dev -H exe-dash _status)")
+assert_contains "$status_output" "exe-dash/ar-general-dev"
+assert_contains "$status_output" "rescans every 30s"
+off_status=$(plain "$(DEV_REFRESH_SECS=0 DEV_CACHE="$CACHE_FIXTURE" run_dev -H exe-dash _status)")
+assert_contains "$off_status" "auto refresh off"
+
+offline_output=$(DEV_TEST_SSH_FAIL=1 DEV_CACHE="$CACHE_FIXTURE" run_dev -H dash _scan)
+assert_contains "$offline_output" "/home/exedev/sample"
+[ -e "$CACHE_FIXTURE.err" ] || fail "a failed scan should mark the cache unreachable"
+offline_status=$(plain "$(DEV_CACHE="$CACHE_FIXTURE" run_dev -H dash _status)")
+assert_contains "$offline_status" "unreachable"
+
+if reach_error=$(DEV_TEST_SSH_FAIL=1 run_dev -H dash ls 2>&1); then
+  fail "an unreachable box should fail the listing: $reach_error"
+fi
+assert_contains "$reach_error" "could not reach dash"
 
 : > "$CLIPBOARD"
 task_plan_output=$(run_dev -H exe-dash task plan dashlytix/sample prompt "Fix login")

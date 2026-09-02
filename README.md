@@ -20,12 +20,12 @@ dev                     browse worktrees with a live preview pane
                           ↑ ↓        move, preview updates as you go
                           enter      copy herdr login command
                           →          open the action menu
-                          ← esc      quit
+                          esc        quit
                           ctrl-o     VS Code      ctrl-h  herdr
                           ctrl-s     herdr, in a chosen or new session
                           ctrl-p     preview      ctrl-e  env push
                           ctrl-n     new task workspace
-                          ctrl-r     refresh
+                          ctrl-r     re-scan now; it also re-scans on a timer
 dev ls                  list every worktree, with any servers it is running
 dev ps                  every listening server on the box, with preview URLs
 dev preview [query]     open a running server in the browser
@@ -64,8 +64,18 @@ copy directly without opening the browser.
 The preview pane shows branch, HEAD, relative age and subject, working-tree
 state, ahead/behind against upstream, the herdr workspace, and any URLs the
 worktree is serving. It renders from the cached scan rather than hitting the box
-per keystroke, so arrowing through the list is instant. `ctrl-r` re-scans, and
-the cache refreshes automatically after any action that could change state.
+per keystroke, so arrowing through the list is instant.
+
+The browser keeps that cache fresh by itself. Every `DEV_REFRESH_SECS` seconds
+(30 by default, `0` disables it) it re-scans the box in the background and swaps
+in the new list, preview, and status line without moving your cursor or clearing
+your query. `ctrl-r` scans immediately, also in place. The line under the prompt
+names the box, when it last scanned, and the cadence; if the box stops
+answering, that line turns yellow and the last good list stays on screen. The
+cache also refreshes after any action that could change state.
+
+Shortcuts sit in the footer below the list, so none of them has to be
+remembered.
 
 Pressing `enter` copies the command and returns to the workspace list, keeping
 `dev` open as a live view of the box. The action menu also loops: backing out
@@ -288,6 +298,8 @@ a live subscription — re-import when the fleet changes.
 ## Requirements
 
 Local: `bash`, `fzf`, `python3`, `ssh`, and the `code` CLI for the VS Code path.
+`fzf` 0.62 or newer draws the shortcut footer; older builds show the same
+shortcuts in the header instead.
 Task workspaces additionally use `gh` for PRs and `linear` for Linear issues.
 Remote: `herdr`, `omp`, `git`, `gh`, and `python3`.
 
@@ -332,6 +344,7 @@ same key (for example `Host box-name`); `dev` uses that alias when available.
 | `DEV_REMOTE_HOME` | `/home/exedev` | Remote home, where repos are searched |
 | `DEV_WT_ROOT` | `$DEV_REMOTE_HOME/worktrees` | Where new worktrees are created |
 | `DEV_SESSION` | `default` | herdr session to attach |
+| `DEV_REFRESH_SECS` | `30` | Seconds between background re-scans in the browser; `0` disables them |
 | `DEV_PROXY_HOST` | resolved SSH hostname | hostname the exe.dev proxy serves |
 | `DEV_PROXY_PORT` | `8000` | the designated port, served at the bare hostname |
 | `DEV_TS_HOST` | resolved hostname without `.exe.xyz` | Tailscale/MagicDNS name, used for ports outside 3000-9999 |

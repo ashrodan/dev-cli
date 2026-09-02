@@ -6,12 +6,13 @@
 #   dev              browse worktrees
 #                      ↑ ↓     move, preview updates live
 #                      enter copy herdr login command
-#                      →     open the action menu     ← / esc quit
+#                      →     open the action menu     esc quit
 #                      ctrl-o  VS Code     ctrl-h  herdr
 #                      ctrl-s  herdr, in a chosen or new session
 #                      ctrl-p  preview     ctrl-e  env push
 #                      ctrl-n  new task workspace
-#                      ctrl-r  refresh
+#                      ctrl-r  re-scan now; the list also re-scans itself
+#                              every DEV_REFRESH_SECS seconds (0 disables)
 #   dev ls           list every worktree, with any servers it is running
 #   dev ps           list listening servers on the box, with preview URLs
 #   dev new [repo] <branch> [--base ref]
@@ -44,6 +45,8 @@ SESSION="${DEV_SESSION:-default}"
 PROXY_HOST="${DEV_PROXY_HOST:-}"
 TS_HOST="${DEV_TS_HOST:-}"
 PROXY_PORT="${DEV_PROXY_PORT:-8000}"
+REFRESH_SECS="${DEV_REFRESH_SECS:-30}"
+FZF_FOOTER=""
 
 die()  { printf 'dev: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
@@ -305,6 +308,27 @@ fmt() {
     dirty = ($9 + 0 > 0 ? sprintf("\033[33m*%-3s\033[0m", $9) : "    ")
     printf "%s%-13s  \033[1m%-34s\033[0m %s %s %s\n", mark, $1, $2, dirty, srv, $3
   }'
+}
+
+# Shortcut captions: bold key, dim caption, three spaces between pairs.
+keycaps() {
+  local out="" cap
+  while [ $# -ge 2 ]; do
+    printf -v cap '\033[1m%s\033[0m \033[2m%s\033[0m' "$1" "$2"
+    out="${out:+$out   }$cap"
+    shift 2
+  done
+  printf '%s' "$out"
+}
+
+# fzf grew --footer in 0.62. Probe the option rather than parse a version, and
+# fall back to a header full of shortcuts on older builds.
+fzf_has_footer() {
+  if [ -z "$FZF_FOOTER" ]; then
+    FZF_FOOTER=no
+    fzf --footer=x --version >/dev/null 2>&1 </dev/null && FZF_FOOTER=yes
+  fi
+  [ "$FZF_FOOTER" = yes ]
 }
 
 # --- live preview pane -----------------------------------------------------
@@ -1026,6 +1050,10 @@ action_menu() {
   need fzf
   local path="$1" ports="$2" srv="none" out key choice
   [ -n "$ports" ] && srv="$ports"
+  local -a chrome=(--header="$(basename "$path")  —  ← back")
+  fzf_has_footer && chrome=(--header="$(basename "$path")"
+                            --footer="$(keycaps enter run "←/esc" back)"
+                            --footer-border=line)
   out=$(printf '%s\n' \
     "copy     copy herdr login command" \
     "pr       create or open its draft PR with local gh auth" \
@@ -1038,8 +1066,8 @@ action_menu() {
     "ask      ask an agent, in this directory" \
     "shell    plain ssh shell here" \
     "rm       remove this worktree" |
-    fzf --prompt='action> ' --reverse --height=35% --expect=left,esc \
-        --header="$(basename "$path")  —  ← back") || return 1
+    fzf --prompt='action> ' --reverse --height=~55% --expect=left,esc \
+        "${chrome[@]}") || return 1
   key=$(printf '%s\n' "$out" | sed -n 1p)
   choice=$(printf '%s\n' "$out" | sed -n 2p)
   case "$key" in left|esc) return 1 ;; esac
@@ -1066,19 +1094,68 @@ action_menu() {
 # global is discarded. It therefore *prints* its result and resolve() unpacks it
 # in the calling shell. This is what previously broke every non-default key.
 CACHE=""
-cleanup() { [ -n "$CACHE" ] && rm -f "$CACHE"; }
+cleanup() { [ -n "$CACHE" ] && rm -f "$CACHE" "$CACHE".*; }
 trap cleanup EXIT
+
+# The preview pane and the periodic reload both read the cache while a scan may
+# be in flight, so a scan lands by rename and never writes in place. A scan that
+# fails leaves the last good list alone and drops a marker the status line
+# reads: losing the SSH connection must not blank the browser.
+#   1 unreachable   2 reachable but empty
+scan_into() {
+  local cache="$1" tmp="$1.$$" rc=0
+  scan 2>/dev/null > "$tmp" || rc=1
+  if [ "$rc" = 0 ] && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$cache"
+    date '+%H:%M:%S' > "$cache.at"
+    rm -f "$cache.err"
+    return 0
+  fi
+  rm -f "$tmp"
+  : > "$cache.err"
+  [ "$rc" = 0 ] && return 2
+  return 1
+}
 
 refresh_cache() {
   [ -z "$CACHE" ] && CACHE=$(mktemp "${TMPDIR:-/tmp}/dev-scan.XXXXXX")
-  scan 2>/dev/null > "$CACHE" || die "could not reach $REMOTE"
   export DEV_CACHE="$CACHE"
-  [ -s "$CACHE" ] || die "no git repositories found under $RHOME"
+  scan_into "$CACHE"
+  case $? in
+    1) die "could not reach $REMOTE" ;;
+    2) die "no git repositories found under $RHOME" ;;
+  esac
+}
+
+# Internal: the reload source fzf runs, on a timer and on ctrl-r. It prints the
+# list it just scanned, or the previous one when the box did not answer.
+cmd_scan() {
+  local cache="${DEV_CACHE:-}"
+  [ -n "$cache" ] && [ -f "$cache" ] || return 0
+  scan_into "$cache" || true
+  fmt < "$cache"
+}
+
+# Internal: the status line. A list that re-scans itself has to say when it last
+# did, and whether the box answered.
+cmd_status() {
+  local cache="${DEV_CACHE:-}" at="" where="$REMOTE"
+  [ -n "$BOX" ] && where="$REMOTE/$BOX"
+  [ -n "$cache" ] && at=$(cat "$cache.at" 2>/dev/null || true)
+  if [ -n "$cache" ] && [ -f "$cache.err" ]; then
+    printf '\033[2m%s\033[0m   \033[33m%s unreachable, showing the scan from %s\033[0m\n' \
+      "$where" "$REMOTE" "${at:-startup}"
+  elif [ "$REFRESH_SECS" -gt 0 ] 2>/dev/null; then
+    printf '\033[2m%s   scanned %s, rescans every %ss\033[0m\n' "$where" "${at:-—}" "$REFRESH_SECS"
+  else
+    printf '\033[2m%s   scanned %s, auto refresh off\033[0m\n' "$where" "${at:-—}"
+  fi
 }
 
 pick() {
   need fzf
-  local out key line path ports
+  local out key line path ports self tick row1 row2 row3
+  local -a chrome=()
   if [ -n "${1:-}" ]; then
     local hit; hit=$(grep -i -- "$1" "$CACHE" || true)
     if [ "$(printf '%s\n' "$hit" | grep -c .)" = 1 ]; then
@@ -1087,11 +1164,33 @@ pick() {
     fi
   fi
 
+  printf -v self '%q' "$0"
+  # The footer shares the list pane, not the whole window, so each row has to
+  # stay inside roughly half the terminal or fzf truncates it.
+  row1=$(keycaps "↑↓" move enter "copy login" "→" actions esc quit)
+  row2=$(keycaps ctrl-h herdr ctrl-s session ctrl-o code ctrl-p preview)
+  row3=$(keycaps ctrl-n task ctrl-e env ctrl-r refresh)
+
+  if fzf_has_footer; then
+    chrome=(--footer="$row1"$'\n'"$row2"$'\n'"$row3" --footer-border=line
+            --header="$(cmd_status)" --info=inline-right)
+    tick="transform-header($self _status)+refresh-preview"
+  else
+    chrome=(--header="$row1"$'\n'"$row2"$'\n'"$row3")
+    tick="refresh-preview"
+  fi
+  # `load` fires whenever a list finishes loading, so a reload scheduled there
+  # re-arms itself: one sleeping child, no background poller, and fzf kills it
+  # on exit. reload-sync keeps the current list on screen while the scan runs.
+  [ "$REFRESH_SECS" -gt 0 ] 2>/dev/null &&
+    tick="$tick+reload-sync(sleep $REFRESH_SECS; $self _scan)"
+
   out=$(fmt < "$CACHE" |
         fzf --ansi --reverse --height=100% --prompt='workspace> ' --query="${1:-}" \
-            --header='↑↓ move   enter copy login   → menu   ctrl-n task   ctrl-o code   ctrl-h herdr   ctrl-s session   ctrl-p preview   ctrl-e env   ctrl-r refresh' \
-            --preview="$0 _pane {-1}" --preview-window='right,52%,border-left,wrap' \
-            --expect=right,ctrl-n,ctrl-o,ctrl-h,ctrl-s,ctrl-p,ctrl-e,ctrl-r) || return 1
+            "${chrome[@]}" \
+            --bind "load:$tick" --bind "ctrl-r:reload-sync($self _scan)" \
+            --preview="$self _pane {-1}" --preview-window='right,52%,border-left,wrap' \
+            --expect=right,ctrl-n,ctrl-o,ctrl-h,ctrl-s,ctrl-p,ctrl-e) || return 1
 
   key=$(printf '%s\n' "$out" | sed -n 1p)
   line=$(printf '%s\n' "$out" | sed -n 2p)
@@ -1121,7 +1220,6 @@ browse() {
       "")      copy_herdr_command "$REPLY_PATH" ;;
       right)   action_menu "$REPLY_PATH" "$REPLY_PORTS" || continue ;;
       ctrl-n)  cmd_task || true ;;
-      ctrl-r)  refresh_cache; continue ;;
       ctrl-o)  open_code    "$REPLY_PATH" ;;
       ctrl-h)  open_herdr   "$REPLY_PATH" ;;   # attaches, then exits
       ctrl-s)  sess=$(pick_session) && open_herdr "$REPLY_PATH" "$sess" || true ;;
@@ -1389,7 +1487,7 @@ main() {
   done
   case "${1:-}" in
     -h|--help)
-      sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+      awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0"
       return
       ;;
   esac
@@ -1398,6 +1496,8 @@ main() {
 
   case "${1:-}" in
     _pane)     shift; cmd_pane "$@" ;;          # internal: fzf preview
+    _scan)     shift; cmd_scan "$@" ;;          # internal: fzf reload source
+    _status)   shift; cmd_status "$@" ;;        # internal: fzf status line
     ls|list)   shift; cmd_ls "$@" ;;
     ps)        shift; cmd_ps "$@" ;;
     new|add)   shift; cmd_new "$@" ;;
