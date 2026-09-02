@@ -201,8 +201,16 @@ case "$*" in
     fi
     : > "$DEV_TEST_FZF_STATE"
     IFS= read -r line || exit 1
-    printf '\n%s\n' "$line"
+    printf '%s\n%s\n' "${DEV_TEST_WORKSPACE_KEY:-}" "$line"
     exit 0
+    ;;
+  *"action> "*)
+    while IFS= read -r line; do
+      case "$line" in
+        "${DEV_TEST_ACTION:-copy}"*) printf '\n%s\n' "$line"; exit 0 ;;
+      esac
+    done
+    exit 1
     ;;
 esac
 while IFS= read -r line; do
@@ -285,6 +293,7 @@ run_dev() {
     DEV_TEST_PR_BRANCH="${DEV_TEST_PR_BRANCH:-}" DEV_TEST_EXISTING_PR="${DEV_TEST_EXISTING_PR:-}" \
     DEV_TEST_EXISTING_WORKTREE="${DEV_TEST_EXISTING_WORKTREE:-}" \
     DEV_TEST_SSH_FAIL="${DEV_TEST_SSH_FAIL:-}" DEV_REFRESH_SECS="${DEV_REFRESH_SECS:-}" \
+    DEV_TEST_WORKSPACE_KEY="${DEV_TEST_WORKSPACE_KEY:-}" DEV_TEST_ACTION="${DEV_TEST_ACTION:-}" \
     DEV_TEST_CLIPBOARD="$CLIPBOARD" DEV_TEST_FZF_STATE="$FZF_STATE" \
     DEV_SSH_CONFIG="$TMP/ssh/config" DEV_PROJECT_ROOT="$TMP/projects" "$ROOT/dev" "$@"
 }
@@ -346,7 +355,24 @@ assert_contains "$refresh_calls" "_status)+refresh-preview+reload-sync(sleep 45;
 assert_contains "$refresh_calls" "--bind ctrl-r:reload-sync("
 assert_contains "$refresh_calls" "--footer-border=line"
 assert_contains "$refresh_calls" "ctrl-r refresh"
+assert_contains "$refresh_calls" "--bind resize:transform-footer("
 assert_not_contains "$refresh_calls" "ctrl-e,ctrl-r"
+
+# Pressing right opens the action menu, anchored to the bottom-right corner so
+# every menu the browser opens appears in the same place.
+: > "$LOG"
+: > "$CLIPBOARD"
+rm -f "$FZF_STATE"
+menu_output=$(DEV_TEST_WORKSPACE_KEY=right DEV_TEST_ACTION=copy run_dev -H exe-dash)
+menu_calls=$(plain "$(<"$LOG")")
+assert_contains "$menu_output" "dev: copied"
+assert_contains "$menu_calls" "fzf --prompt=action> "
+assert_contains "$menu_calls" "--border-label= actions "
+assert_contains "$menu_calls" "enter run   ←/esc back"
+action_margin=$(printf '%s\n' "$menu_calls" | sed -n 's/.*--margin=\([0-9]*,[0-9]*,[0-9]*,[0-9]*\).*/\1/p' | sed -n 1p)
+[ -n "$action_margin" ] || fail "the action menu should be placed with a margin"
+[ "${action_margin##*,}" -gt 0 ] || fail "the action menu should sit in the right half: $action_margin"
+[ "${action_margin%%,*}" -gt 0 ] || fail "the action menu should sit at the bottom: $action_margin"
 
 : > "$LOG"
 rm -f "$FZF_STATE"
@@ -364,7 +390,7 @@ assert_not_contains "$scan_output" "/home/exedev/stale"
 [ -s "$CACHE_FIXTURE.at" ] || fail "_scan should record when it last scanned"
 [ ! -e "$CACHE_FIXTURE.err" ] || fail "_scan should clear the unreachable marker"
 
-status_output=$(plain "$(DEV_CACHE="$CACHE_FIXTURE" run_dev -H exe-dash _status)")
+status_output=$(plain "$(DEV_BOX=ar-general-dev DEV_CACHE="$CACHE_FIXTURE" run_dev -H exe-dash _status)")
 assert_contains "$status_output" "exe-dash/ar-general-dev"
 assert_contains "$status_output" "rescans every 30s"
 off_status=$(plain "$(DEV_REFRESH_SECS=0 DEV_CACHE="$CACHE_FIXTURE" run_dev -H exe-dash _status)")

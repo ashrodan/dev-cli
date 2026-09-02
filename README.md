@@ -75,7 +75,16 @@ answering, that line turns yellow and the last good list stays on screen. The
 cache also refreshes after any action that could change state.
 
 Shortcuts sit in the footer below the list, so none of them has to be
-remembered.
+remembered. fzf gives the footer the width of the list rather than of the
+window, so the captions are packed to the pane that is actually there and
+repacked when the terminal is resized — a narrow pane gets more rows rather than
+truncated hints.
+
+Every menu the browser opens — `→` actions, `ctrl-s` sessions, `ctrl-p` ports,
+`ctrl-n` projects, `ctrl-e` env vars — opens as a labelled panel in the
+bottom-right corner, under where the preview pane was, with its own hint along
+the bottom. One position for all of them, so the eye does not have to hunt for
+the menu that just appeared.
 
 Pressing `enter` copies the command and returns to the workspace list, keeping
 `dev` open as a live view of the box. The action menu also loops: backing out

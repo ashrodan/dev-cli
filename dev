@@ -331,6 +331,68 @@ fzf_has_footer() {
   [ "$FZF_FOOTER" = yes ]
 }
 
+# tput measures its own stdout, which is a pipe inside $( ), so it reports the
+# terminfo default instead of the terminal that is there. Ask the tty directly.
+term_size() {
+  local size
+  size=$( { stty size </dev/tty; } 2>/dev/null || true )
+  case "$size" in
+    [0-9]*' '[0-9]*) printf '%s' "$size" ;;
+    *)               printf '24 80' ;;
+  esac
+}
+
+# Every menu the browser opens appears in the same place — the bottom-right
+# corner, under where the preview pane was — instead of wherever the cursor
+# happened to be when the list closed. One shape and one hint style for all of
+# them: `panel LABEL [key caption]...` fills in the fzf arguments.
+CORNER=()
+corner_window() {
+  local size rows cols height top left
+  size=$(term_size); rows="${size%% *}"; cols="${size#* }"
+  height=18
+  [ "$height" -gt $(( rows - 2 )) ] && height=$(( rows - 2 ))
+  [ "$height" -lt 6 ] && height=6
+  top=$(( rows - height )); [ "$top" -lt 0 ] && top=0
+  left=$(( cols * 48 / 100 )); [ "$left" -lt 0 ] && left=0
+  CORNER=(--height=100% "--margin=$top,0,0,$left" --border=rounded
+          --border-label=" $1 " --border-label-pos=3)
+}
+
+panel() {
+  local label="$1"
+  shift
+  corner_window "$label"
+  [ $# -ge 2 ] && fzf_has_footer &&
+    CORNER+=(--footer="$(keycaps "$@")" --footer-border=line)
+  return 0
+}
+
+# Internal: the shortcut rows. fzf gives the footer the width of the list, not of
+# the window, so the captions are packed to the pane that is actually there and
+# repacked when the terminal is resized.
+cmd_keys() {
+  local avail line="" used=0 out="" pair w
+  avail=$(( ${FZF_COLUMNS:-80} * 48 / 100 - 3 ))
+  [ "$avail" -lt 14 ] && avail=14
+  set -- "↑↓" move enter "copy login" "→" actions ctrl-r refresh esc quit \
+         ctrl-h herdr ctrl-s session ctrl-o code ctrl-p preview \
+         ctrl-n task ctrl-e env
+  while [ $# -ge 2 ]; do
+    w=$(( ${#1} + 1 + ${#2} ))
+    pair=$(keycaps "$1" "$2")
+    if [ -z "$line" ]; then
+      line="$pair"; used="$w"
+    elif [ $(( used + 3 + w )) -le "$avail" ]; then
+      line="$line   $pair"; used=$(( used + 3 + w ))
+    else
+      out="$out$line"$'\n'; line="$pair"; used="$w"
+    fi
+    shift 2
+  done
+  printf '%s%s\n' "$out" "$line"
+}
+
 # --- live preview pane -----------------------------------------------------
 # Rendered from the cached scan, so arrowing through the list costs nothing.
 cmd_pane() {
@@ -530,10 +592,11 @@ for x in d.get("sessions", []):
 pick_session() {
   need fzf
   local choice name
+  panel sessions enter attach esc cancel
   choice=$({ sessions_list | awk -F'\t' 'NF{printf "%-20s %-8s %s\n", $1, $2, $3}'
              printf '%-20s %s\n' "+new" "start a fresh, isolated session"
-           } | fzf --prompt='session> ' --reverse --height=40% \
-                   --header='each session has its own workspaces   esc cancels') || return 1
+           } | fzf --prompt='session> ' --reverse "${CORNER[@]}" \
+                   --header='each session has its own workspaces') || return 1
   name=$(printf '%s' "$choice" | awk '{print $1}')
   if [ "$name" = "+new" ]; then
     printf 'name for the new session: ' >&2
@@ -591,9 +654,10 @@ open_preview() {
   fi
   if [ "$(printf '%s' "$ports" | tr ',' '\n' | grep -c .)" -gt 1 ]; then
     need fzf
+    panel ports enter open esc cancel
     choice=$(printf '%s' "$ports" | tr ',' '\n' |
              while read -r p; do printf '%s\t%s\n' "$p" "$(url_for "$p")"; done |
-             fzf --prompt='port> ' --reverse --height=30% --delimiter='\t' --with-nth=2) || return 1
+             fzf --prompt='port> ' --reverse "${CORNER[@]}" --delimiter='\t' --with-nth=2) || return 1
     port=$(printf '%s' "$choice" | cut -f1)
   else
     port="$ports"
@@ -642,16 +706,57 @@ def slug(url):
     parts = [part for part in path.removesuffix(".git").split("/") if part]
     return "/".join(parts[-2:]) if len(parts) >= 2 else ""
 
+def origin_from_config(path):
+    marker = path / ".git"
+    if marker.is_dir():
+        git_dir = marker
+    else:
+        try:
+            pointer = marker.read_text(errors="replace").strip()
+        except OSError:
+            return ""
+        if not pointer.startswith("gitdir:"):
+            return ""
+        git_dir = pathlib.Path(pointer.split(":", 1)[1].strip())
+        if not git_dir.is_absolute():
+            git_dir = (path / git_dir).resolve()
+        common = git_dir / "commondir"
+        if common.is_file():
+            try:
+                git_dir = (git_dir / common.read_text().strip()).resolve()
+            except OSError:
+                return ""
+    try:
+        text = (git_dir / "config").read_text(errors="replace")
+    except OSError:
+        return ""
+    section = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].replace("\"", "").split()
+            section = " ".join(section)
+            continue
+        if section == "remote origin" and line.startswith("url"):
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "url":
+                return value.strip()
+    return ""
+
+# One `git remote get-url` per checkout costs seconds once there are dozens of
+# them, and the answer is sitting in the config file.
 if root.is_dir():
     for path in root.iterdir():
         if not path.is_dir() or not (path / ".git").exists():
             continue
-        try:
-            remote = subprocess.check_output(
-                ["git", "-C", str(path), "remote", "get-url", "origin"],
-                text=True, stderr=subprocess.DEVNULL).strip()
-        except (OSError, subprocess.CalledProcessError):
-            continue
+        remote = origin_from_config(path)
+        if not remote:
+            try:
+                remote = subprocess.check_output(
+                    ["git", "-C", str(path), "remote", "get-url", "origin"],
+                    text=True, stderr=subprocess.DEVNULL).strip()
+            except (OSError, subprocess.CalledProcessError):
+                continue
         project = slug(remote)
         if not project:
             continue
@@ -665,9 +770,15 @@ for project, (_, path) in sorted(repos.items()):
 ' "${DEV_PROJECT_ROOT:-$HOME/dev}"
 }
 
+# The browser already holds a scan no older than DEV_REFRESH_SECS, so ctrl-n does
+# not need to spend another SSH round trip on a blank screen.
 box_repo_names() {
-  scan 2>/dev/null |
-    awk -F'\t' '$5 == "main" && !seen[$1]++ { print $1 }'
+  local cache="${DEV_CACHE:-}" repos='$5 == "main" && !seen[$1]++ { print $1 }'
+  if [ -n "$cache" ] && [ -s "$cache" ]; then
+    awk -F'\t' "$repos" "$cache"
+    return 0
+  fi
+  scan 2>/dev/null | awk -F'\t' "$repos"
 }
 
 pick_project() {
@@ -681,11 +792,12 @@ pick_project() {
       { name = $1; sub(/^.*\//, "", name); if (box[name]) print }
     ' <(printf '%s\n' "$box_repos") <(printf '%s\n' "$projects"))
 
+  panel projects enter pick esc cancel
   if [ -n "$shortlist" ]; then
     choice=$({ printf '%s\n' "$shortlist"
               printf '+all\tshow all local GitHub projects\n'
             } |
-             fzf --prompt='project> ' --reverse --height=50% --delimiter=$'\t' \
+             fzf --prompt='project> ' --reverse "${CORNER[@]}" --delimiter=$'\t' \
                  --with-nth=1,2 --header='Projects already on this box') ||
       return 1
     project=$(printf '%s' "$choice" | cut -f1)
@@ -696,7 +808,7 @@ pick_project() {
   fi
 
   choice=$(printf '%s\n' "$projects" |
-           fzf --prompt='project all> ' --reverse --height=50% --delimiter=$'\t' \
+           fzf --prompt='project all> ' --reverse "${CORNER[@]}" --delimiter=$'\t' \
                --with-nth=1,2 --header='All canonical local GitHub projects') ||
     return 1
   printf '%s' "$choice" | cut -f1
@@ -826,11 +938,12 @@ task_wizard() {
   need fzf
   local project kind choice ref
   project=$(pick_project) || return 1
+  panel task enter pick esc cancel
   choice=$(printf '%s\n' \
              'pr      GitHub pull request' \
              'linear  Linear issue' \
              'prompt  free-form task prompt' |
-           fzf --prompt='task type> ' --reverse --height=30%) || return 1
+           fzf --prompt='task type> ' --reverse "${CORNER[@]}") || return 1
   kind="${choice%% *}"
   case "$kind" in
     pr)     printf 'PR number or URL: ' >&2 ;;
@@ -1050,10 +1163,8 @@ action_menu() {
   need fzf
   local path="$1" ports="$2" srv="none" out key choice
   [ -n "$ports" ] && srv="$ports"
-  local -a chrome=(--header="$(basename "$path")  —  ← back")
-  fzf_has_footer && chrome=(--header="$(basename "$path")"
-                            --footer="$(keycaps enter run "←/esc" back)"
-                            --footer-border=line)
+  panel actions enter run "←/esc" back
+  local -a chrome=(--header="$(basename "$path")")
   out=$(printf '%s\n' \
     "copy     copy herdr login command" \
     "pr       create or open its draft PR with local gh auth" \
@@ -1066,8 +1177,8 @@ action_menu() {
     "ask      ask an agent, in this directory" \
     "shell    plain ssh shell here" \
     "rm       remove this worktree" |
-    fzf --prompt='action> ' --reverse --height=~55% --expect=left,esc \
-        "${chrome[@]}") || return 1
+    fzf --prompt='action> ' --reverse --expect=left,esc \
+        "${CORNER[@]}" "${chrome[@]}") || return 1
   key=$(printf '%s\n' "$out" | sed -n 1p)
   choice=$(printf '%s\n' "$out" | sed -n 2p)
   case "$key" in left|esc) return 1 ;; esac
@@ -1154,7 +1265,7 @@ cmd_status() {
 
 pick() {
   need fzf
-  local out key line path ports self tick row1 row2 row3
+  local out key line path ports self tick keys cols
   local -a chrome=()
   if [ -n "${1:-}" ]; then
     local hit; hit=$(grep -i -- "$1" "$CACHE" || true)
@@ -1165,18 +1276,16 @@ pick() {
   fi
 
   printf -v self '%q' "$0"
-  # The footer shares the list pane, not the whole window, so each row has to
-  # stay inside roughly half the terminal or fzf truncates it.
-  row1=$(keycaps "↑↓" move enter "copy login" "→" actions esc quit)
-  row2=$(keycaps ctrl-h herdr ctrl-s session ctrl-o code ctrl-p preview)
-  row3=$(keycaps ctrl-n task ctrl-e env ctrl-r refresh)
+  cols=$(term_size); cols="${cols#* }"
+  keys=$(FZF_COLUMNS="$cols" cmd_keys)
 
   if fzf_has_footer; then
-    chrome=(--footer="$row1"$'\n'"$row2"$'\n'"$row3" --footer-border=line
-            --header="$(cmd_status)" --info=inline-right)
+    chrome=(--footer="$keys" --footer-border=line --info=inline-right
+            --header="$(cmd_status)"
+            --bind "resize:transform-footer($self _keys)")
     tick="transform-header($self _status)+refresh-preview"
   else
-    chrome=(--header="$row1"$'\n'"$row2"$'\n'"$row3")
+    chrome=(--header="$keys")
     tick="refresh-preview"
   fi
   # `load` fires whenever a list finishes loading, so a reload scheduled there
@@ -1382,16 +1491,18 @@ cmd_env() {
       ;;
     push)
       need fzf
+      panel env enter pick esc cancel
       [ -z "$from" ] && from="$HOME/dev/$repo/.env"
       if [ ! -f "$from" ]; then
         from=$(find "$HOME/dev" -maxdepth 2 -name '.env*' -not -path '*/node_modules/*' 2>/dev/null |
-               fzf --prompt='source .env> ' --reverse --height=40%) || return 1
+               fzf --prompt='source .env> ' --reverse "${CORNER[@]}") || return 1
       fi
       [ -f "$from" ] || die "no source file"
 
       local keys
+      panel env tab select enter push esc cancel
       keys=$(env_keys_local "$from" | awk -F'\t' '{printf "%-32s %s\n", $1, $2}' |
-             fzf --multi --prompt='vars to copy> ' --reverse --height=50% \
+             fzf --multi --prompt='vars to copy> ' --reverse "${CORNER[@]}" \
                  --header="$from  →  $REMOTE:$target/.env    tab = select, enter = push" |
              awk '{print $1}') || return 1
       [ -z "$keys" ] && { echo "nothing selected"; return 0; }
@@ -1485,11 +1596,15 @@ main() {
         ;;
     esac
   done
+  # The footer and the status line are pure layout, so they answer before
+  # configure_remote spends an `ssh -G` on them; a resize must stay cheap.
   case "${1:-}" in
     -h|--help)
       awk 'NR > 1 { if (!/^#/) exit; sub(/^# ?/, ""); print }' "$0"
       return
       ;;
+    _keys)   cmd_keys; return ;;
+    _status) cmd_status; return ;;
   esac
 
   configure_remote
@@ -1497,7 +1612,6 @@ main() {
   case "${1:-}" in
     _pane)     shift; cmd_pane "$@" ;;          # internal: fzf preview
     _scan)     shift; cmd_scan "$@" ;;          # internal: fzf reload source
-    _status)   shift; cmd_status "$@" ;;        # internal: fzf status line
     ls|list)   shift; cmd_ls "$@" ;;
     ps)        shift; cmd_ps "$@" ;;
     new|add)   shift; cmd_new "$@" ;;
