@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # dev — worktree-first navigator for the herdr dev box.
 #
-#   dev -P|--profile [command...]       pick an exe.dev SSH profile
-#   dev [-H host] [-B box] [command...] use a host; select a box for profiles
+#   dev -P|--profile [command...]       pick an exe.dev SSH profile and box
+#   dev [-H host] [-B box] [command...] use a host; select or provision a box
 #   dev              browse worktrees
 #                      ↑ ↓     move, preview updates live
 #                      enter copy herdr login command
@@ -29,6 +29,8 @@
 #   dev preview [query]              open a running server in the browser
 #   dev env push|ls|diff [query] [--from FILE]
 #   dev ask [-a agent] [-w query] [question...]
+#   dev box new [name] [owner/repo] [--yes]
+#   dev box bootstrap owner/repo
 #
 # Worktrees are the unit of work. The main checkout is just the worktree that
 # happens to hold the primary branch.
@@ -52,17 +54,8 @@ SCREEN=""
 die()  { printf 'dev: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
 
-configure_remote() {
-  local resolved choices choice count
-  resolved=$(ssh -G "$REMOTE" 2>/dev/null |
-             awk '$1 == "hostname" { print $2; exit }')
-  [ -n "$resolved" ] || resolved="$REMOTE"
-
-  # An exe.dev account alias (for example `exe-dash`) reaches the lobby rather
-  # than a VM. Resolve it to a shell-capable running box while retaining the
-  # alias as the SSH destination, so its IdentityFile still selects the account.
-  if [ -z "$SSH_OVERRIDE_HOST" ] && [ "$resolved" = "exe.dev" ]; then
-    choices=$(ssh "$REMOTE" ls --json 2>/dev/null | python3 -c '
+list_running_boxes() {
+  ssh "$REMOTE" ls --json 2>/dev/null | python3 -c '
 import json, sys
 try:
     vms = json.load(sys.stdin).get("vms", [])
@@ -74,28 +67,233 @@ for vm in vms:
         host = vm.get("ssh_host") or vm.get("ssh_dest") or ""
         if name and host:
             print(name + "\t" + host)
-') || die "could not list boxes through SSH profile $REMOTE"
-    [ -n "$choices" ] || die "SSH profile $REMOTE has no running shell-capable boxes"
+'
+}
+
+wait_for_box() {
+  local name="$1" choices choice attempts=0
+  while [ "$attempts" -lt 60 ]; do
+    choices=$(list_running_boxes 2>/dev/null || true)
+    choice=$(printf '%s\n' "$choices" |
+             awk -F'\t' -v box="$name" '$1 == box { print; exit }')
+    if [ -n "$choice" ]; then
+      printf '%s\n' "$choice"
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  return 1
+}
+
+bootstrap_box_agent() {
+  ssh_remote "bash -s" <<'REMOTE_EOF'
+set -euo pipefail
+export HOME=/home/exedev
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+if ! command -v herdr >/dev/null 2>&1; then
+  curl -fsSL https://herdr.dev/install.sh | sh
+fi
+if ! command -v omp >/dev/null 2>&1; then
+  sudo npm install -g @oh-my-pi/pi-coding-agent
+fi
+
+herdr integration install omp
+service=$(mktemp)
+cat > "$service" <<'UNIT'
+[Unit]
+Description=herdr agent runtime (headless server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=exedev
+WorkingDirectory=/home/exedev
+Environment=HOME=/home/exedev
+Environment=PATH=/home/exedev/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/exedev/.local/bin/herdr server
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+sudo install -m 0644 "$service" /etc/systemd/system/herdr.service
+rm -f "$service"
+sudo systemctl daemon-reload
+sudo systemctl enable --now herdr.service
+systemctl is-active --quiet herdr.service
+REMOTE_EOF
+}
+
+setup_box_project() {
+  local project="$1" name="${BOX:-${SSH_OVERRIDE_HOST%.exe.xyz}}"
+  local repo_name integration line dest qdest qurl opened fields pane agent qname qpane
+
+  printf 'dev: installing Herdr and OMP\n'
+  bootstrap_box_agent ||
+    die "box $name is running but agent setup failed; resume with: dev -H $REMOTE -B $name box bootstrap $project"
+
+  repo_name="${project##*/}"
+  line=$(ssh "$REMOTE" integrations list 2>/dev/null |
+         awk -v repo="repos=$project" 'index($0, repo) { print; exit }')
+  if [ -n "$line" ]; then
+    integration="${line%% *}"
+    case "$line" in
+      *"vm:$name"*) ;;
+      *) ssh "$REMOTE" integrations attach "$integration" "vm:$name" ||
+           die "could not attach GitHub integration $integration to $name" ;;
+    esac
+  else
+    integration="$repo_name"
+    ssh "$REMOTE" integrations add github "--name=$integration" \
+      "--repository=$project" "--attach=vm:$name" ||
+      die "could not add the GitHub integration for $project"
+  fi
+
+  dest="$RHOME/$repo_name"
+  printf -v qdest '%q' "$dest"
+  printf -v qurl '%q' "https://github.int.exe.xyz/$project.git"
+  ssh_remote "
+    set -e
+    if [ -d $qdest/.git ]; then
+      exit 0
+    fi
+    [ ! -e $qdest ] || {
+      printf 'destination exists but is not a git checkout: %s\n' $qdest >&2
+      exit 2
+    }
+    attempt=0
+    until git clone $qurl $qdest; do
+      attempt=\$((attempt + 1))
+      [ \"\$attempt\" -lt 10 ] || exit 3
+      sleep 2
+    done
+  " || die "could not clone $project; resume with: dev -H $REMOTE -B $name box bootstrap $project"
+
+  printf -v qname '%q' "$repo_name"
+  opened=$(ssh_remote "$HERDR --session $SESSION worktree open --cwd $qdest --path $qdest --focus") ||
+    die "could not open $project in Herdr"
+  fields=$(printf '%s' "$opened" | python3 -c '
+import json, sys
+try:
+    root = json.load(sys.stdin).get("result", {}).get("root_pane") or {}
+    print((root.get("pane_id") or "") + "\x1f" + (root.get("agent") or ""))
+except Exception:
+    pass
+')
+  IFS=$'\037' read -r pane agent <<< "$fields"
+  [ -n "$pane" ] || die "Herdr did not return a pane for $project"
+  case "$agent" in
+    omp) ;;
+    "")
+      printf -v qpane '%q' "$pane"
+      ssh_remote "$HERDR --session $SESSION agent start $qname --kind omp --pane $qpane" ||
+        die "repository is ready but OMP did not start; resume with: dev -H $REMOTE -B $name herdr $repo_name"
+      ;;
+    *) die "repository opened with $agent already running instead of OMP" ;;
+  esac
+}
+
+provision_box() {
+  local name="${1:-${DEV_NEW_BOX_NAME:-}}" project="${2:-${DEV_NEW_BOX_PROJECT:-}}"
+  local yes="${3:-${DEV_NEW_BOX_YES:-}}" resolved answer created choice
+
+  resolved=$(ssh -G "$REMOTE" 2>/dev/null |
+             awk '$1 == "hostname" { print $2; exit }')
+  [ "$resolved" = "exe.dev" ] ||
+    die "box provisioning requires an exe.dev lobby profile, not $REMOTE"
+
+  if [ -z "$name" ]; then
+    [ -t 0 ] || die "usage: dev -H PROFILE box new NAME OWNER/REPO [--yes]"
+    printf 'box name> ' >&2
+    IFS= read -r name
+  fi
+  case "$name" in
+    [a-z0-9]*)
+      case "$name" in
+        *[!a-z0-9-]*) die "box name may contain only lowercase letters, numbers, and hyphens" ;;
+        *-) die "box name must end with a lowercase letter or number" ;;
+      esac
+      ;;
+    *) die "box name must start with a lowercase letter or number" ;;
+  esac
+  if [ -z "$project" ]; then
+    project=$(pick_project) || return 1
+  fi
+  case "$project" in
+    */*) ;;
+    *) die "project must be OWNER/REPO: $project" ;;
+  esac
+
+  if [ "$yes" != "yes" ] && [ "$yes" != "1" ]; then
+    [ -t 0 ] || die "box creation requires --yes without an interactive terminal"
+    printf 'Create billable box %s, clone %s, and start OMP? [y/N] ' "$name" "$project" >&2
+    IFS= read -r answer
+    case "$answer" in y|Y|yes|YES) ;; *) return 1 ;; esac
+  fi
+
+  printf 'dev: creating %s through %s\n' "$name" "$REMOTE"
+  created=$(ssh "$REMOTE" new --json "--name=$name" --tag=tailscale \
+            "--comment=dev-cli:$project") ||
+    die "exe.dev could not create box $name"
+  [ -n "$created" ] || die "exe.dev returned no result for box $name"
+
+  printf 'dev: waiting for shell access\n'
+  choice=$(wait_for_box "$name") ||
+    die "box $name was created but did not become shell-ready; resume with: dev -H $REMOTE -B $name box bootstrap $project"
+  BOX=$(printf '%s' "$choice" | cut -f1)
+  SSH_OVERRIDE_HOST=$(printf '%s' "$choice" | cut -f2)
+
+  setup_box_project "$project"
+  printf 'dev: %s is ready with %s and OMP\n' "$name" "$project"
+}
+
+configure_remote() {
+  local resolved choices choice count
+  resolved=$(ssh -G "$REMOTE" 2>/dev/null |
+             awk '$1 == "hostname" { print $2; exit }')
+  [ -n "$resolved" ] || resolved="$REMOTE"
+
+  # An exe.dev account alias (for example `exe-dash`) reaches the lobby rather
+  # than a VM. Resolve it to a shell-capable running box while retaining the
+  # alias as the SSH destination, so its IdentityFile still selects the account.
+  if [ -z "$SSH_OVERRIDE_HOST" ] && [ "$resolved" = "exe.dev" ]; then
+    choices=$(list_running_boxes) ||
+      die "could not list boxes through SSH profile $REMOTE"
 
     if [ -n "$BOX" ]; then
       choice=$(printf '%s\n' "$choices" |
                awk -F'\t' -v box="$BOX" '$1 == box || $2 == box { print; exit }')
       [ -n "$choice" ] || die "box $BOX is not a running box in SSH profile $REMOTE"
-    else
-      count=$(printf '%s\n' "$choices" | awk 'NF { n++ } END { print n + 0 }')
-      if [ "$count" -eq 1 ]; then
-        choice="$choices"
-      else
-        [ -t 0 ] || die "SSH profile $REMOTE has multiple boxes; select one with --box NAME"
-        need fzf
-        choice=$(printf '%s\n' "$choices" |
-                 fzf --prompt='box> ' --reverse --height=30% --delimiter=$'\t' --with-nth=1) ||
-          exit 0
+    elif [ -t 0 ] || [ -n "${DEV_TEST_BOX_PICKER:-}" ]; then
+      need fzf
+      choice=$({ [ -z "$choices" ] || printf '%s\n' "$choices"
+                 printf '+new\tcreate a box, clone a repository, and start OMP\n'
+               } |
+               fzf --prompt='box> ' --reverse --height=30% --delimiter=$'\t' \
+                   --with-nth=1,2 --header='exe.dev boxes') ||
+        exit 0
+      if [ "${choice%%	*}" = "+new" ]; then
+        provision_box || return 1
+        resolved="$SSH_OVERRIDE_HOST"
+        choice=""
       fi
+    else
+      [ -n "$choices" ] || die "SSH profile $REMOTE has no running shell-capable boxes"
+      count=$(printf '%s\n' "$choices" | awk 'NF { n++ } END { print n + 0 }')
+      [ "$count" -eq 1 ] ||
+        die "SSH profile $REMOTE has multiple boxes; select one with --box NAME"
+      choice="$choices"
     fi
-    BOX=$(printf '%s' "$choice" | cut -f1)
-    SSH_OVERRIDE_HOST=$(printf '%s' "$choice" | cut -f2)
-    resolved="$SSH_OVERRIDE_HOST"
+
+    if [ -n "$choice" ]; then
+      BOX=$(printf '%s' "$choice" | cut -f1)
+      SSH_OVERRIDE_HOST=$(printf '%s' "$choice" | cut -f2)
+      resolved="$SSH_OVERRIDE_HOST"
+    fi
   fi
 
   [ -n "$PROXY_HOST" ] || PROXY_HOST="$resolved"
@@ -1614,6 +1812,43 @@ cmd_ask() {
     ssh_remote "cd '$path' && export PATH=\$HOME/.local/bin:\$PATH && P=\$(cat) && $one"
 }
 
+
+# --- box provisioning ------------------------------------------------------
+cmd_box_new() {
+  local name="" project="" yes="" arg
+  while [ $# -gt 0 ]; do
+    arg="$1"
+    shift
+    case "$arg" in
+      --yes|-y) yes=yes ;;
+      -* ) die "unknown box option: $arg" ;;
+      *)
+        if [ -z "$name" ]; then
+          name="$arg"
+        elif [ -z "$project" ]; then
+          project="$arg"
+        else
+          die "usage: dev -H PROFILE box new [NAME] [OWNER/REPO] [--yes]"
+        fi
+        ;;
+    esac
+  done
+  provision_box "$name" "$project" "$yes"
+}
+
+cmd_box() {
+  local action="${1:-}"
+  shift || true
+  case "$action" in
+    bootstrap)
+      [ $# -eq 1 ] || die "usage: dev -H PROFILE -B BOX box bootstrap OWNER/REPO"
+      case "$1" in */*) ;; *) die "project must be OWNER/REPO: $1" ;; esac
+      setup_box_project "$1"
+      printf 'dev: %s is ready with %s and OMP\n' "$BOX" "$1"
+      ;;
+    *) die "usage: dev box new [NAME] [OWNER/REPO] [--yes] | dev box bootstrap OWNER/REPO" ;;
+  esac
+}
 # --- main ------------------------------------------------------------------
 main() {
   local sess
@@ -1669,7 +1904,14 @@ main() {
     _focus)  cmd_focus; return ;;
   esac
 
-  configure_remote
+
+  # Creating a box addresses the exe.dev lobby itself, not an existing VM.
+  if [ "${1:-}" = "box" ] && [ "${2:-}" = "new" ]; then
+    shift 2
+    cmd_box_new "$@"
+    return
+  fi
+  configure_remote || return
 
   case "${1:-}" in
     _pane)     shift; cmd_pane "$@" ;;          # internal: fzf preview
@@ -1680,6 +1922,7 @@ main() {
     env)       shift; cmd_env "$@" ;;
     github)    shift; cmd_github "$@" ;;
     ask|\?)    shift; cmd_ask "$@" ;;
+    box)       shift; cmd_box "$@" ;;
     rm|remove) shift; refresh_cache; resolve "${1:-}" && rm_worktree "$REPLY_PATH" ;;
     code)      shift; refresh_cache; resolve "${1:-}" && open_code "$REPLY_PATH" ;;
     pr)        shift; refresh_cache; resolve "${1:-}" && open_pull_request "$REPLY_PATH" ;;

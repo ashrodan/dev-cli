@@ -12,7 +12,7 @@ happens to hold the primary branch.
 ## Usage
 
 ```
-dev -P [command]        interactively pick an exe.dev SSH profile
+dev -P [command]        pick an exe.dev SSH profile, then a box
 dev --profile [command] long form of `-P`
 dev -H HOST [command]   use another SSH config alias and its configured key
 dev -H PROFILE -B BOX  select an exe.dev box through an account/lobby alias
@@ -37,6 +37,10 @@ dev pr [query]          create or open its draft PR using local `gh` auth
 dev github setup        install tokenless `gh` integration wrapper on the box
 dev github status       show the GitHub actor used by remote `gh`
 dev task                select a project and prepare a task workspace
+dev box new [name] [owner/repo] [--yes]
+                        create a box, clone a repo, and start OMP in Herdr
+dev box bootstrap owner/repo
+                        resume setup on the selected existing box
 dev herdr -S [query]    pick the session first
 dev herdr -s NAME       attach in a named session, created if it does not exist
 dev sessions            list herdr sessions on the box
@@ -334,10 +338,31 @@ Host work-box
   IdentitiesOnly yes
 ```
 
-An exe.dev lobby alias such as `exe-dash` can also be passed directly. `dev`
-lists that account's running boxes and keeps the alias's identity while
-connecting. A single box is selected automatically; select among several with
-`dev -H exe-dash -B box-name`.
+An exe.dev lobby alias such as `exe-dash` can also be passed directly. In an
+interactive terminal, `dev` lists that account's running boxes and adds
+`+new — create a box, clone a repository, and start OMP` at the bottom. Existing
+scripts remain non-interactive: a single running box is selected automatically,
+while multiple boxes require `dev -H exe-dash -B box-name`.
+
+The new-box flow asks for a valid exe.dev name, lets you select a canonical
+local GitHub project, and confirms the billable creation. It creates the VM with
+the `tailscale` tag, waits for shell access, installs Herdr and OMP, enables the
+Herdr system service, attaches or creates the repository's exe.dev GitHub
+integration, clones through `github.int.exe.xyz`, opens the repository in
+Herdr, and starts OMP. No GitHub PAT is copied to the VM. A newly installed OMP
+may still present its provider login on first launch; authentication is not
+copied between boxes.
+
+The same operation is scriptable:
+
+```sh
+dev -H exe-dash box new agent-2 dashlytix/sample --yes
+dev -H exe-dash -B agent-2 box bootstrap dashlytix/sample
+```
+
+`box bootstrap` is idempotent and is the recovery path printed when creation
+succeeds but installation, integration attachment, cloning, or agent startup
+fails. It never deletes the partially configured VM.
 
 `dev -P` reads exact `Host` aliases from `~/.ssh/config` and its `Include`
 files, keeps aliases whose resolved hostname is `exe.dev`, and shows their

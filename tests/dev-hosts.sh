@@ -7,6 +7,7 @@ trap 'rm -rf "$TMP"' EXIT
 LOG="$TMP/calls"
 CLIPBOARD="$TMP/clipboard"
 FZF_STATE="$TMP/fzf-state"
+NEW_BOX_STATE="$TMP/new-box-state"
 mkdir -p "$TMP/bin" "$TMP/ssh/config.d"
 mkdir -p "$TMP/projects/sample" "$TMP/projects/sample-worktree" "$TMP/projects/other"
 git -C "$TMP/projects/sample" init -q
@@ -57,13 +58,23 @@ if [ "${1:-}" = "-G" ]; then
 fi
 
 if [ "$*" = "exe-dash ls --json" ]; then
-  if [ -n "${DEV_TEST_MULTI:-}" ]; then
+  if [ -e "$DEV_TEST_NEW_BOX_STATE" ]; then
+    printf '%s\n' '{"vms":[{"vm_name":"fresh-box","ssh_host":"fresh-box.exe.xyz","status":"running","access":{"shell":true}}]}'
+  elif [ -n "${DEV_TEST_MULTI:-}" ]; then
     printf '%s\n' '{"vms":[{"vm_name":"ar-general-dev","ssh_host":"ar-general-dev.exe.xyz","status":"running","access":{"shell":true}},{"vm_name":"second-box","ssh_host":"second-box.exe.xyz","status":"running","access":{"shell":true}}]}'
   else
     printf '%s\n' '{"vms":[{"vm_name":"ar-general-dev","ssh_host":"ar-general-dev.exe.xyz","status":"running","access":{"shell":true}}]}'
   fi
   exit 0
 fi
+case "$*" in
+  "exe-dash new --json --name=fresh-box --tag=tailscale --comment=dev-cli:dashlytix/sample")
+    [ -z "${DEV_TEST_NEW_FAIL:-}" ] || exit 3
+    : > "$DEV_TEST_NEW_BOX_STATE"
+    printf '%s\n' '{"vm_name":"fresh-box"}'
+    exit 0
+    ;;
+esac
 if [ "$*" = "exe-dash integrations list" ]; then
   if [ -n "${DEV_TEST_INTEGRATION_EXISTS:-}" ]; then
     printf 'sample-github  github  repos=dashlytix/sample\n'
@@ -164,6 +175,17 @@ case "$*" in
   *--version*)
     printf '0.65.2 (stub)\n'
     exit 0
+    ;;
+  *"box> "*)
+    while IFS= read -r line; do
+      printf 'box-row %s\n' "$line" >> "$DEV_TEST_LOG"
+      box=${line%%	*}
+      if [ -z "${DEV_TEST_PICK:-}" ] || [ "$box" = "$DEV_TEST_PICK" ]; then
+        printf '%s\n' "$line"
+        exit 0
+      fi
+    done
+    exit 1
     ;;
   *"project all> "*)
     while IFS= read -r line; do
@@ -292,9 +314,13 @@ run_dev() {
     DEV_TEST_CROSS_REPO_WORKTREE="${DEV_TEST_CROSS_REPO_WORKTREE:-}" \
     DEV_TEST_PR_BRANCH="${DEV_TEST_PR_BRANCH:-}" DEV_TEST_EXISTING_PR="${DEV_TEST_EXISTING_PR:-}" \
     DEV_TEST_EXISTING_WORKTREE="${DEV_TEST_EXISTING_WORKTREE:-}" \
-    DEV_TEST_SSH_FAIL="${DEV_TEST_SSH_FAIL:-}" DEV_REFRESH_SECS="${DEV_REFRESH_SECS:-}" \
+    DEV_TEST_SSH_FAIL="${DEV_TEST_SSH_FAIL:-}" DEV_TEST_NEW_FAIL="${DEV_TEST_NEW_FAIL:-}" \
+    DEV_TEST_BOX_PICKER="${DEV_TEST_BOX_PICKER:-}" \
+    DEV_NEW_BOX_NAME="${DEV_NEW_BOX_NAME:-}" DEV_NEW_BOX_PROJECT="${DEV_NEW_BOX_PROJECT:-}" \
+    DEV_NEW_BOX_YES="${DEV_NEW_BOX_YES:-}" DEV_REFRESH_SECS="${DEV_REFRESH_SECS:-}" \
     DEV_TEST_WORKSPACE_KEY="${DEV_TEST_WORKSPACE_KEY:-}" DEV_TEST_ACTION="${DEV_TEST_ACTION:-}" \
     DEV_TEST_CLIPBOARD="$CLIPBOARD" DEV_TEST_FZF_STATE="$FZF_STATE" \
+    DEV_TEST_NEW_BOX_STATE="$NEW_BOX_STATE" \
     DEV_SSH_CONFIG="$TMP/ssh/config" DEV_PROJECT_ROOT="$TMP/projects" "$ROOT/dev" "$@"
 }
 
@@ -571,12 +597,58 @@ if multi_error=$(DEV_TEST_MULTI=1 run_dev -H exe-dash ls </dev/null 2>&1); then
 fi
 assert_contains "$multi_error" "select one with --box NAME"
 
+rm -f "$NEW_BOX_STATE"
+: > "$LOG"
+new_box_output=$(run_dev -H exe-dash box new fresh-box dashlytix/sample --yes)
+new_box_calls=$(<"$LOG")
+assert_contains "$new_box_output" "fresh-box is ready with dashlytix/sample and OMP"
+assert_contains "$new_box_calls" "ssh exe-dash new --json --name=fresh-box --tag=tailscale --comment=dev-cli:dashlytix/sample"
+assert_contains "$new_box_calls" "ssh -o HostName=fresh-box.exe.xyz exe-dash bash -s"
+assert_contains "$new_box_calls" "integrations add github --name=sample --repository=dashlytix/sample --attach=vm:fresh-box"
+assert_contains "$new_box_calls" "git clone https://github.int.exe.xyz/dashlytix/sample.git /home/exedev/sample"
+assert_contains "$new_box_calls" "agent start sample --kind omp"
+
+: > "$NEW_BOX_STATE"
+: > "$LOG"
+bootstrap_output=$(DEV_TEST_INTEGRATION_EXISTS=1 \
+  run_dev -H exe-dash -B fresh-box box bootstrap dashlytix/sample)
+bootstrap_calls=$(<"$LOG")
+assert_contains "$bootstrap_output" "fresh-box is ready with dashlytix/sample and OMP"
+assert_contains "$bootstrap_calls" "integrations attach sample-github vm:fresh-box"
+assert_contains "$bootstrap_calls" "agent start sample --kind omp"
+
+rm -f "$NEW_BOX_STATE"
+: > "$LOG"
+picker_output=$(DEV_TEST_BOX_PICKER=1 DEV_TEST_PICK=+new \
+  DEV_NEW_BOX_NAME=fresh-box DEV_NEW_BOX_PROJECT=dashlytix/sample DEV_NEW_BOX_YES=1 \
+  run_dev -H exe-dash ls)
+picker_calls=$(<"$LOG")
+assert_contains "$picker_calls" $'box-row +new\tcreate a box, clone a repository, and start OMP'
+assert_contains "$picker_calls" "fzf --prompt=box> "
+
+rm -f "$NEW_BOX_STATE"
+: > "$LOG"
+if invalid_box_error=$(run_dev -H exe-dash box new 'Bad Box' dashlytix/sample --yes 2>&1); then
+  fail "invalid box names should stop before provisioning"
+fi
+assert_contains "$invalid_box_error" "box name must start"
+invalid_box_calls=$(<"$LOG")
+assert_not_contains "$invalid_box_calls" " new --json "
+
+rm -f "$NEW_BOX_STATE"
+if create_error=$(DEV_TEST_NEW_FAIL=1 \
+    run_dev -H exe-dash box new fresh-box dashlytix/sample --yes 2>&1); then
+  fail "exe.dev creation failures should stop provisioning"
+fi
+assert_contains "$create_error" "exe.dev could not create box fresh-box"
+
 : > "$LOG"
 help_output=$(run_dev -H exe-dash --help)
 help_calls=$(<"$LOG")
 assert_contains "$help_output" "pick an exe.dev SSH profile"
 assert_contains "$help_output" "dev task"
 assert_contains "$help_output" "dev github setup"
+assert_contains "$help_output" "dev box new"
 [ -z "$help_calls" ] || fail "help should not invoke SSH: $help_calls"
 
 printf 'dev-hosts: all checks passed\n'
