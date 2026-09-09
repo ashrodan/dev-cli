@@ -82,6 +82,25 @@ if [ "$*" = "exe-dash integrations list" ]; then
   exit 0
 fi
 
+case "$*" in
+  *"HostName=ar-general-dev.exe.xyz"*"RHOME="*"SESSION="*)
+    printf 'sample\tw-main\t/home/exedev/sample\tmain\n'
+    exit 0
+    ;;
+  *"HostName=second-box.exe.xyz"*"RHOME="*"SESSION="*)
+    exit 0
+    ;;
+  *"HostName=ar-general-dev.exe.xyz"*"HERDR="*"SESSION="*)
+    exit 0
+    ;;
+  *"HostName=second-box.exe.xyz"*"HERDR="*"SESSION="*)
+    printf 'agent\tcodex\t4242\t/home/exedev/sample\tcodex --full-auto\n'
+    printf 'shell\tbash\t4343\t/home/exedev\t/dev/pts/4\n'
+    printf 'tmux\tbuild\tbuild\t/home/exedev/sample\tdetached, 2 windows\n'
+    exit 0
+    ;;
+esac
+
 
 case "$*" in
   *"worktree list --cwd "*)
@@ -182,6 +201,16 @@ case "$*" in
       box=${line%%	*}
       if [ -z "${DEV_TEST_PICK:-}" ] || [ "$box" = "$DEV_TEST_PICK" ]; then
         printf '%s\n' "$line"
+        exit 0
+      fi
+    done
+    exit 1
+    ;;
+  *"fleet> "*)
+    while IFS= read -r line; do
+      IFS=$'\t' read -r _ _ _ kind _ <<< "$line"
+      if [ -z "${DEV_TEST_FLEET_KIND:-}" ] || [ "$kind" = "$DEV_TEST_FLEET_KIND" ]; then
+        printf '\n%s\n' "$line"
         exit 0
       fi
     done
@@ -318,6 +347,7 @@ run_dev() {
     DEV_TEST_BOX_PICKER="${DEV_TEST_BOX_PICKER:-}" \
     DEV_NEW_BOX_NAME="${DEV_NEW_BOX_NAME:-}" DEV_NEW_BOX_PROJECT="${DEV_NEW_BOX_PROJECT:-}" \
     DEV_NEW_BOX_YES="${DEV_NEW_BOX_YES:-}" DEV_REFRESH_SECS="${DEV_REFRESH_SECS:-}" \
+    DEV_TEST_FLEET_KIND="${DEV_TEST_FLEET_KIND:-}" \
     DEV_TEST_WORKSPACE_KEY="${DEV_TEST_WORKSPACE_KEY:-}" DEV_TEST_ACTION="${DEV_TEST_ACTION:-}" \
     DEV_TEST_CLIPBOARD="$CLIPBOARD" DEV_TEST_FZF_STATE="$FZF_STATE" \
     DEV_TEST_NEW_BOX_STATE="$NEW_BOX_STATE" \
@@ -597,6 +627,36 @@ if multi_error=$(DEV_TEST_MULTI=1 run_dev -H exe-dash ls </dev/null 2>&1); then
 fi
 assert_contains "$multi_error" "select one with --box NAME"
 
+: > "$LOG"
+fleet_output=$(DEV_TEST_MULTI=1 run_dev -H exe-dash fleet ls)
+fleet_plain=$(plain "$fleet_output")
+fleet_calls=$(<"$LOG")
+assert_contains "$fleet_output" "ar-general-dev      online"
+assert_contains "$fleet_plain" "ar-general-dev      ● herdr"
+assert_contains "$fleet_plain" "second-box          online"
+assert_contains "$fleet_plain" "second-box          ◆ agent"
+assert_contains "$fleet_plain" "second-box          ■ shell"
+assert_contains "$fleet_plain" "codex"
+assert_contains "$fleet_plain" "second-box          ■ tmux"
+assert_contains "$fleet_calls" "HostName=ar-general-dev.exe.xyz"
+assert_contains "$fleet_calls" "HostName=second-box.exe.xyz"
+assert_not_contains "$fleet_output" "second-box.exe.xyz"
+
+: > "$LOG"
+fleet_picker_output=$(DEV_TEST_MULTI=1 DEV_TEST_BOX_PICKER=1 DEV_TEST_PICK=+all \
+  run_dev -H exe-dash ls)
+fleet_picker_plain=$(plain "$fleet_picker_output")
+fleet_picker_calls=$(<"$LOG")
+assert_contains "$fleet_picker_plain" "second-box          ◆ agent"
+
+: > "$LOG"
+fleet_agent_output=$(DEV_TEST_MULTI=1 DEV_TEST_FLEET_KIND=agent \
+  run_dev -H exe-dash fleet)
+fleet_agent_calls=$(<"$LOG")
+assert_contains "$fleet_agent_output" "codex pid 4242 is running outside Herdr"
+assert_contains "$fleet_agent_calls" "ssh -t -o HostName=second-box.exe.xyz exe-dash cd /home/exedev/sample"
+assert_contains "$fleet_picker_calls" $'box-row +all\tmonitor Herdr and unmanaged sessions on every box'
+
 rm -f "$NEW_BOX_STATE"
 : > "$LOG"
 new_box_output=$(run_dev -H exe-dash box new fresh-box dashlytix/sample --yes)
@@ -624,6 +684,7 @@ picker_output=$(DEV_TEST_BOX_PICKER=1 DEV_TEST_PICK=+new \
   run_dev -H exe-dash ls)
 picker_calls=$(<"$LOG")
 assert_contains "$picker_calls" $'box-row +new\tcreate a box, clone a repository, and start OMP'
+assert_contains "$picker_calls" $'box-row +all\tmonitor Herdr and unmanaged sessions on every box'
 assert_contains "$picker_calls" "fzf --prompt=box> "
 
 rm -f "$NEW_BOX_STATE"
@@ -649,6 +710,7 @@ assert_contains "$help_output" "pick an exe.dev SSH profile"
 assert_contains "$help_output" "dev task"
 assert_contains "$help_output" "dev github setup"
 assert_contains "$help_output" "dev box new"
+assert_contains "$help_output" "dev fleet"
 [ -z "$help_calls" ] || fail "help should not invoke SSH: $help_calls"
 
 printf 'dev-hosts: all checks passed\n'

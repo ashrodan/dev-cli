@@ -28,6 +28,8 @@ dev                     browse worktrees with a live preview pane
                           ctrl-r     re-scan now; it also re-scans on a timer
 dev ls                  list every worktree, with any servers it is running
 dev ps                  every listening server on the box, with preview URLs
+dev fleet               unified Herdr and unmanaged sessions across every box
+dev fleet ls            print the same fleet view without the picker
 dev preview [query]     open a running server in the browser
 dev new [repo] <branch> [--base ref]
 dev code  [query]       open in VS Code, skipping the picker on a unique match
@@ -339,10 +341,25 @@ Host work-box
 ```
 
 An exe.dev lobby alias such as `exe-dash` can also be passed directly. In an
-interactive terminal, `dev` lists that account's running boxes and adds
-`+new — create a box, clone a repository, and start OMP` at the bottom. Existing
-scripts remain non-interactive: a single running box is selected automatically,
-while multiple boxes require `dev -H exe-dash -B box-name`.
+interactive terminal, `dev` lists that account's running boxes and adds two
+fleet actions at the bottom:
+
+- `+all` monitors every box in one list, including boxes without Herdr.
+- `+new` creates a box, clones a repository, and starts OMP.
+
+The unified fleet runs each box scan concurrently. It shows open Herdr
+workspaces, interactive agent processes running outside Herdr, idle interactive
+shells, and `tmux` or GNU Screen sessions. `●` identifies Herdr workspaces, `◆`
+unmanaged agents, and `■` terminal sessions. Enter attaches to Herdr, tmux, or
+Screen. A raw agent or shell owns a PTY with no detachable protocol, so selecting
+one opens a new shell in its working directory instead. Unmanaged process
+monitoring reports presence, PID, command, TTY, and working directory, but
+cannot infer Herdr-style idle, working, blocked, or approval states.
+
+Use `dev -H exe-dash fleet` to open the unified list directly, or
+`dev -H exe-dash fleet ls` for non-interactive output. Existing single-box
+scripts remain unchanged: one running box is selected automatically, while
+multiple boxes require `dev -H exe-dash -B box-name`.
 
 The new-box flow asks for a valid exe.dev name, lets you select a canonical
 local GitHub project, and confirms the billable creation. It creates the VM with
