@@ -75,6 +75,24 @@ case "$*" in
     exit 0
     ;;
 esac
+case "$*" in
+  *"FLEET_AUDIT=1"*)
+    cat >/dev/null
+    case "$*" in
+      *second-box*) printf 'second-box\t95d\t93%%\t0.8.0\tmanual\t2026-11-22\tbudget\n' ;;
+      *)            printf 'ar-general-dev\t29d\t70%%\t0.9.5\tsystemd\t2026-11-22\t-\n' ;;
+    esac
+    exit 0
+    ;;
+  *"FLEET_HERDR=1"*)
+    # Run the real remote script here, with no herdr installed, so the dry
+    # run's state logic is exercised. The dry run exits before any change.
+    remote=${*: -1}
+    remote=${remote/RHOME=\'\/home\/exedev\'/RHOME=\'$DEV_TEST_TMP\/nohome\'}
+    PATH="$DEV_TEST_TMP/remote-bin:$PATH" eval "$remote"
+    exit $?
+    ;;
+esac
 if [ "$*" = "exe-dash integrations list" ]; then
   if [ -n "${DEV_TEST_INTEGRATION_EXISTS:-}" ]; then
     printf 'sample-github  github  repos=dashlytix/sample\n'
@@ -333,8 +351,15 @@ assert_not_contains() {
 # The logged fzf arguments carry the footer's bold/dim attributes.
 plain() { printf '%s' "$1" | sed $'s/\033\\[[0-9;]*m//g'; }
 
+mkdir -p "$TMP/remote-bin" "$TMP/nohome"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/remote-bin/systemctl"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/remote-bin/pgrep"
+chmod +x "$TMP/remote-bin/systemctl" "$TMP/remote-bin/pgrep"
+printf '{\n  "version": "0.9.5",\n  "assets": {}\n}\n' > "$TMP/latest.json"
+
 run_dev() {
   PATH="$TMP/bin:$PATH" DEV_TEST_LOG="$LOG" DEV_TEST_MULTI="${DEV_TEST_MULTI:-}" \
+    DEV_TEST_TMP="$TMP" DEV_HERDR_MANIFEST_URL="file://$TMP/latest.json" \
     DEV_TEST_PICK="${DEV_TEST_PICK:-}" DEV_TEST_PROJECT="${DEV_TEST_PROJECT:-}" \
     DEV_TEST_ALL_PROJECT="${DEV_TEST_ALL_PROJECT:-}" \
     DEV_TEST_REPO_MISSING="${DEV_TEST_REPO_MISSING:-}" DEV_TEST_CLONE_FAIL="${DEV_TEST_CLONE_FAIL:-}" \
@@ -704,6 +729,28 @@ fi
 assert_contains "$create_error" "exe.dev could not create box fresh-box"
 
 : > "$LOG"
+audit_output=$(DEV_TEST_MULTI=1 run_dev -H exe-dash fleet audit)
+audit_plain=$(plain "$audit_output")
+assert_contains "$audit_plain" "ar-general-dev"
+assert_contains "$audit_plain" "0.8.0*"
+assert_contains "$audit_plain" "manual"
+assert_contains "$audit_plain" "latest herdr: 0.9.5"
+
+if herdr_usage=$(run_dev -H exe-dash fleet herdr 2>&1); then
+  fail "fleet herdr without boxes should refuse"
+fi
+assert_contains "$herdr_usage" "--all|BOX..."
+
+: > "$LOG"
+herdr_plan=$(DEV_TEST_MULTI=1 run_dev -H exe-dash fleet herdr second-box)
+herdr_calls=$(<"$LOG")
+assert_contains "$herdr_plan" "dry run: nothing changes"
+assert_contains "$herdr_plan" $'second-box\tplan (none): install 0.9.5, install unit, start under systemd'
+assert_contains "$herdr_calls" "HostName=second-box.exe.xyz"
+assert_contains "$herdr_calls" "APPLY=0"
+assert_not_contains "$herdr_calls" "HostName=ar-general-dev.exe.xyz"
+
+: > "$LOG"
 help_output=$(run_dev -H exe-dash --help)
 help_calls=$(<"$LOG")
 assert_contains "$help_output" "pick an exe.dev SSH profile"
@@ -711,6 +758,7 @@ assert_contains "$help_output" "dev task"
 assert_contains "$help_output" "dev github setup"
 assert_contains "$help_output" "dev box new"
 assert_contains "$help_output" "dev fleet"
+assert_contains "$help_output" "dev fleet herdr"
 [ -z "$help_calls" ] || fail "help should not invoke SSH: $help_calls"
 
 printf 'dev-hosts: all checks passed\n'
