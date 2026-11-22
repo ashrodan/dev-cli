@@ -330,6 +330,9 @@ Rules:
 - Only the default session counts. A named session (`HERDR_SESSION` set) has
   its own socket and is left alone.
 
+To move VMs from one exe.dev account to another, see
+[docs/exe-account-migration.md](docs/exe-account-migration.md).
+
 ## Fleet discovery
 
 Two helpers in `bin/`, for reaching the box and its siblings from other devices.
