@@ -16,6 +16,10 @@
 #   dev ls           list every worktree, with any servers it is running
 #   dev ps           list listening servers on the box, with preview URLs
 #   dev fleet          monitor Herdr and unmanaged sessions across every box
+#   dev fleet audit    uptime, disk, activity and herdr state of every box
+#   dev fleet herdr [--apply] [--restart] --all|BOX...
+#                      put the latest herdr under systemd on those boxes;
+#                      a dry run unless --apply
 #   dev new [repo] <branch> [--base ref]
 #   dev rm   [query]
 #   dev code [query]                 open in VS Code
@@ -746,6 +750,244 @@ cmd_fleet_rows() {
 
 cmd_fleet_ls() {
   cmd_fleet_rows | cut -f1
+}
+
+# --- fleet audit and herdr server ------------------------------------------
+# Herdr's own installer and release manifest. The installer verifies the
+# binary's SHA-256 against the manifest before it replaces anything.
+HERDR_INSTALL_URL="${DEV_HERDR_INSTALL_URL:-https://herdr.dev/install.sh}"
+HERDR_MANIFEST_URL="${DEV_HERDR_MANIFEST_URL:-https://herdr.dev/latest.json}"
+
+herdr_latest_version() {
+  curl -fsSL --max-time 20 "$HERDR_MANIFEST_URL" 2>/dev/null |
+    awk -F'"' '/^[[:space:]]*"version"[[:space:]]*:/ { print $4; exit }'
+}
+
+# Run one remote script on every running box of the profile, or on the boxes
+# named in FLEET_ONLY, in parallel. Each box prints its own lines; output keeps
+# the order of the box list. Usage: fleet_each VARS < script
+fleet_each() {
+  local vars="$1" choices tmp index=0 pids="" pid file box host script
+  # Read the script before any SSH call: ssh reads stdin and would eat it.
+  script=$(cat)
+  choices=$(list_running_boxes </dev/null) ||
+    die "could not list boxes through SSH profile $REMOTE"
+  [ -n "$choices" ] || die "SSH profile $REMOTE has no running shell-capable boxes"
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/dev-fleet.XXXXXX")
+  while IFS=$'\t' read -r box host; do
+    [ -n "$box" ] && [ -n "$host" ] || continue
+    if [ -n "${FLEET_ONLY:-}" ]; then
+      case " $FLEET_ONLY " in *" $box "*) ;; *) continue ;; esac
+    fi
+    index=$((index + 1))
+    file="$tmp/$(printf '%04d' "$index")"
+    (
+      SSH_OVERRIDE_HOST="$host"
+      if ! printf '%s\n' "$script" |
+           ssh_remote "BOX='$box' RHOME='$RHOME' $vars bash -s" 2>&1; then
+        printf '%s\tunreachable\n' "$box"
+      fi
+    ) > "$file" &
+    pid=$!
+    pids="${pids:+$pids }$pid"
+  done <<< "$choices"
+  for pid in $pids; do wait "$pid" || true; done
+  for file in "$tmp"/*; do [ -f "$file" ] && cat "$file"; done
+  rm -rf "$tmp"
+}
+
+# Prints the herdr state of this box as one word:
+#   none      no herdr binary
+#   systemd   herdr.service is active and owns the server
+#   conflict  herdr.service crash-loops because a hand-started server holds
+#             the default session's socket
+#   failing   herdr.service exists but no server runs
+#   manual    a hand-started default-session server runs; a unit, if any,
+#             waits to take over at the next boot
+#   stopped   herdr is installed but no server runs
+FLEET_HERDR_STATE='
+herdr_bin="$RHOME/.local/bin/herdr"
+herdr_state() {
+  local unit="" manual=""
+  [ -x "$herdr_bin" ] || { echo none; return; }
+  systemctl cat herdr.service >/dev/null 2>&1 && unit=$(systemctl is-active herdr.service 2>/dev/null)
+  # A server that systemd did not start has a parent other than PID 1 or
+  # its own systemd scope; MainPID tells the two apart.
+  local main; main=$(systemctl show -p MainPID --value herdr.service 2>/dev/null || echo 0)
+  # Only the default session counts: a named session (HERDR_SESSION set)
+  # has its own socket and does not block the unit.
+  for p in $(pgrep -u "$(id -u)" -f "herdr server$" 2>/dev/null); do
+    [ "$p" = "$main" ] && continue
+    tr "\0" "\n" < "/proc/$p/environ" 2>/dev/null |
+      grep -qE "^HERDR_SESSION=.+" && continue
+    manual=1
+  done
+  case "$unit" in
+    active)     if [ -n "$manual" ]; then echo conflict; else echo systemd; fi ;;
+    activating|failed)
+                if [ -n "$manual" ]; then echo conflict; else echo failing; fi ;;
+    inactive|deactivating)
+                if [ -n "$manual" ]; then echo manual; else echo failing; fi ;;
+    *)          if [ -n "$manual" ]; then echo manual; else echo stopped; fi ;;
+  esac
+}
+herdr_version() {
+  [ -x "$herdr_bin" ] && "$herdr_bin" --version 2>/dev/null | awk "{ print \$2; exit }"
+}
+'
+
+# Tab separated: 1 box 2 uptime 3 disk% 4 herdr version 5 herdr state
+#   6 last activity (newest file in home, ignoring caches) 7 services
+cmd_fleet_audit() {
+  local rows
+  rows=$(fleet_each "FLEET_AUDIT=1" <<REMOTE_EOF
+set -u
+$FLEET_HERDR_STATE
+up=\$(awk '{ printf "%dd", \$1 / 86400 }' /proc/uptime)
+disk=\$(df -P / | awk 'NR == 2 { print \$5 }')
+last=\$(find "\$RHOME" -maxdepth 4 -type f \
+        -not -path '*/.cache/*' -not -path '*/node_modules/*' \
+        -not -name '*.log' -not -name 'models_cache.json' \
+        -printf '%TY-%Tm-%Td\n' 2>/dev/null | sort -r | head -1)
+svc=\$(systemctl list-units --type=service --state=running --no-legend 2>/dev/null |
+      awk '{ print \$1 }' | sed 's/\.service\$//' |
+      grep -vxE 'systemd-.*|dbus|ssh|cron|getty@.*|serial-getty@.*|user@.*|rsyslog|polkit|unattended-upgrades|containerd|docker|multipathd|chrony|tailscaled|exe-.*|shelley|herdr|ModemManager|udisks2|packagekit|upower|accounts-daemon|irqbalance|cloud-.*' |
+      paste -sd, -)
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "\$BOX" "\$up" "\$disk" "\$(herdr_version || true)" \
+  "\$(herdr_state)" "\${last:--}" "\${svc:--}"
+REMOTE_EOF
+)
+  local latest; latest=$(herdr_latest_version)
+  printf '%s\n' "$rows" | awk -F'\t' -v latest="${latest:-?}" '
+    BEGIN { printf "%-24s %5s %5s  %-8s %-9s %-11s %s\n", "BOX", "UP", "DISK", "HERDR", "MANAGED", "ACTIVE", "SERVICES" }
+    $2 == "unreachable" { printf "%-24s \033[31munreachable\033[0m\n", $1; next }
+    NF >= 7 {
+      ver = ($4 == "" ? "-" : $4)
+      if (ver != "-" && ver != latest) ver = ver "*"
+      st = $5
+      if (st == "systemd") st = "\033[32m" st "\033[0m"
+      else if (st == "conflict" || st == "failing") st = "\033[31m" st "\033[0m"
+      else if (st == "manual" || st == "stopped") st = "\033[33m" st "\033[0m"
+      d = $3; sub(/%/, "", d)
+      disk = (d + 0 >= 90 ? "\033[31m" $3 "\033[0m" : $3)
+      printf "%-24s %5s %5s  %-8s %-18s %-11s %s\n", $1, $2, disk, ver, st, $6, $7
+    }
+    END { printf "\nlatest herdr: %s  (* = behind)\n", latest }'
+}
+
+# Bring herdr on the named boxes to the latest release under the systemd unit
+# that ar-general-dev runs. Without --apply it prints the plan and changes
+# nothing. An upgrade replaces the binary on disk; no running server is
+# stopped or restarted without --restart, because that can end its panes.
+cmd_fleet_herdr() {
+  local apply=0 restart=0 all=0 boxes=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --apply)   apply=1 ;;
+      --restart) restart=1 ;;
+      --all)     all=1 ;;
+      -*)        die "usage: dev -H PROFILE fleet herdr [--apply] [--restart] --all|BOX..." ;;
+      *)         boxes="${boxes:+$boxes }$1" ;;
+    esac
+    shift
+  done
+  [ "$all" = 1 ] || [ -n "$boxes" ] ||
+    die "usage: dev -H PROFILE fleet herdr [--apply] [--restart] --all|BOX..."
+  [ "$all" = 1 ] && [ -n "$boxes" ] && die "fleet herdr: give --all or box names, not both"
+  local latest; latest=$(herdr_latest_version)
+  [ -n "$latest" ] || die "could not read the latest herdr version from $HERDR_MANIFEST_URL"
+  [ "$apply" = 1 ] || printf 'dry run: nothing changes; add --apply to make these changes\n\n'
+  FLEET_ONLY="$boxes" fleet_each \
+    "FLEET_HERDR=1 APPLY=$apply RESTART=$restart LATEST='$latest' INSTALL_URL='$HERDR_INSTALL_URL'" \
+    <<REMOTE_EOF
+set -u
+export PATH="\$RHOME/.local/bin:\$PATH"
+$FLEET_HERDR_STATE
+say() { printf '%s\t%s\n' "\$BOX" "\$*"; }
+state=\$(herdr_state); ver=\$(herdr_version || true)
+plan="" swap=0
+# A running server must not lose its binary without a restart: a newer
+# client cannot attach to an older server (private protocol mismatch).
+running=0
+case "\$state" in systemd|manual|conflict) running=1 ;; esac
+srv=""
+[ "\$running" = 1 ] &&
+  srv=\$(herdr status server 2>/dev/null | awk '\$1 == "version:" { print \$2; exit }')
+if [ -z "\$ver" ]; then plan="install \$LATEST"; swap=1
+elif [ "\$ver" != "\$LATEST" ]; then
+  if [ "\$running" = 1 ] && [ "\$RESTART" != 1 ]; then
+    plan="keep \$ver (upgrade to \$LATEST needs --restart)"
+  else
+    plan="upgrade \$ver -> \$LATEST"; swap=1
+  fi
+fi
+case "\$state" in
+  systemd)  if [ "\$ver" = "\$LATEST" ] && [ "\${srv:-\$ver}" = "\$LATEST" ]; then
+              say "ok: \$ver under systemd"; exit 0
+            fi
+            [ "\$RESTART" = 1 ] && plan="\$plan, restart the unit" ;;
+  none|stopped|failing) plan="\${plan:+\$plan, }install unit, start under systemd" ;;
+  manual)   if [ "\$RESTART" = 1 ]; then plan="\${plan:+\$plan, }stop hand-started server, start under systemd"
+            else plan="\${plan:+\$plan, }install unit (enabled; takes over at next boot or with --restart)"; fi ;;
+  conflict) if [ "\$RESTART" = 1 ]; then plan="\${plan:+\$plan, }stop hand-started server, restart unit"
+            else plan="\${plan:+\$plan, }stop the crash-looping unit (enabled; takes over at next boot or with --restart)"; fi ;;
+esac
+if [ -n "\$srv" ] && [ "\$srv" != "\$LATEST" ] && [ "\$RESTART" != 1 ]; then
+  plan="\${plan:+\$plan, }server still runs \$srv until --restart"
+fi
+plan="\${plan#, }"
+if [ "\$APPLY" != 1 ]; then say "plan (\$state): \$plan"; exit 0; fi
+
+if [ "\$swap" = 1 ]; then
+  # Replace the binary on disk only. A running server keeps its old binary
+  # until it restarts. No live handoff: the handed-off server would run
+  # outside systemd, and the unit would then crash-loop beside it.
+  curl -fsSL --retry 3 "\$INSTALL_URL" | sh >/tmp/herdr-install.log 2>&1 ||
+    { say "error: herdr install failed; see /tmp/herdr-install.log"; exit 0; }
+fi
+
+sudo -n tee /etc/systemd/system/herdr.service >/dev/null <<UNIT
+[Unit]
+Description=herdr agent runtime (headless server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=\$(id -un)
+Group=\$(id -gn)
+WorkingDirectory=\$RHOME
+Environment=HOME=\$RHOME
+Environment=PATH=\$RHOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=\$RHOME/.local/bin/herdr server
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+sudo -n systemctl daemon-reload
+case "\$state" in
+  manual|conflict)
+    if [ "\$RESTART" = 1 ]; then
+      sudo -n systemctl stop herdr.service 2>/dev/null || true
+      herdr server stop >/dev/null 2>&1 || true
+      for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "\$(id -u)" -f "herdr server\$" >/dev/null || break; sleep 1; done
+      sudo -n systemctl enable --now herdr.service >/dev/null 2>&1
+    else
+      sudo -n systemctl enable herdr.service >/dev/null 2>&1
+      sudo -n systemctl stop herdr.service 2>/dev/null || true
+    fi ;;
+  systemd)
+    sudo -n systemctl enable herdr.service >/dev/null 2>&1
+    [ "\$RESTART" = 1 ] && sudo -n systemctl restart herdr.service ;;
+  *) sudo -n systemctl enable herdr.service >/dev/null 2>&1
+     sudo -n systemctl restart herdr.service ;;
+esac
+sleep 3
+running=\$(herdr status server 2>/dev/null | awk '\$1 == "version:" { print \$2; exit }')
+say "done: binary \$(herdr_version), running server \${running:-none}, \$(herdr_state)"
+REMOTE_EOF
 }
 
 select_fleet_target() {
@@ -2240,8 +2482,10 @@ main() {
     export DEV_REMOTE="$REMOTE" DEV_BOX="@fleet"
     case "${1:-}" in
       ls|list) cmd_fleet_ls ;;
+      audit)   cmd_fleet_audit ;;
+      herdr)   shift; cmd_fleet_herdr "$@" ;;
       "")      fleet_browse ;;
-      *)       die "usage: dev -H PROFILE fleet [ls]" ;;
+      *)       die "usage: dev -H PROFILE fleet [ls|audit|herdr]" ;;
     esac
     return
   fi

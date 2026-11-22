@@ -30,6 +30,9 @@ dev ls                  list every worktree, with any servers it is running
 dev ps                  every listening server on the box, with preview URLs
 dev fleet               unified Herdr and unmanaged sessions across every box
 dev fleet ls            print the same fleet view without the picker
+dev fleet audit         uptime, disk, activity and herdr state of every box
+dev fleet herdr [--apply] [--restart] --all|BOX...
+                        put the latest herdr under systemd; a dry run unless --apply
 dev preview [query]     open a running server in the browser
 dev new [repo] <branch> [--base ref]
 dev code  [query]       open in VS Code, skipping the picker on a unique match
@@ -274,6 +277,61 @@ Two grants are needed for BigQuery and they live in different places:
 `roles/bigquery.jobUser` on the project that bills the query, and
 `roles/bigquery.dataViewer` on each dataset that holds data. `metadataViewer`
 gives structure without rows, which is usually the right default for an agent.
+
+## Fleet audit and herdr server
+
+`dev fleet audit` reads every running box of one exe.dev account (one SSH
+profile) in parallel and prints one row for each box: uptime, disk use, herdr
+version, how herdr runs, the date of the newest file in the home directory,
+and the services that are not part of the base image. Run it once for each
+account:
+
+```sh
+dev -H exe.dev   fleet audit     # personal account
+dev -H exe-dash  fleet audit     # Dashlytix account
+```
+
+The MANAGED column has these values:
+
+| Value      | Meaning |
+|------------|---------|
+| `systemd`  | `herdr.service` runs the default-session server. This is the target. |
+| `manual`   | A server started by hand runs. A unit, if there is one, takes over at the next boot. |
+| `conflict` | `herdr.service` crash-loops because a server started by hand holds the socket. |
+| `failing`  | `herdr.service` exists, but no server runs. |
+| `stopped`  | herdr is installed, but no server runs. |
+| `none`     | herdr is not installed. |
+
+A version with `*` is older than the latest release on herdr.dev.
+
+`dev fleet herdr` puts the latest herdr under the same systemd unit that
+`ar-general-dev` runs (`/etc/systemd/system/herdr.service`, `herdr server` as
+`exedev`, `Restart=always`). Name the boxes, or give `--all`. Without `--apply`,
+it only prints the plan.
+
+```sh
+dev -H exe-dash fleet herdr ar-general-dev agentbox            # plan only
+dev -H exe-dash fleet herdr --apply ar-general-dev agentbox    # make the changes
+dev -H exe-dash fleet herdr --apply --restart agentbox         # also restart running servers
+```
+
+Rules:
+
+- The installer is `https://herdr.dev/install.sh`. It checks the binary's
+  SHA-256 against `https://herdr.dev/latest.json` before it installs.
+- Without `--restart`, the command does not stop or restart a running server,
+  and it does not replace the binary under a running server. A newer client
+  cannot attach to an older server (private protocol mismatch), so a binary
+  swap without a restart leaves the server unreachable.
+- With `--restart`, a running server stops and its panes close. Check what it
+  holds first: `herdr workspace list` and `herdr pane list` on the box.
+- The command does not use `herdr update --handoff`. A handed-off server runs
+  outside systemd, and the unit then crash-loops beside it.
+- Only the default session counts. A named session (`HERDR_SESSION` set) has
+  its own socket and is left alone.
+
+To move VMs from one exe.dev account to another, see
+[docs/exe-account-migration.md](docs/exe-account-migration.md).
 
 ## Fleet discovery
 
